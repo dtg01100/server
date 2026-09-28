@@ -4,7 +4,23 @@ Documentation=https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm-i
 # The idempotency guard belongs here and nowhere else. A unit whose condition
 # fails is marked *skipped*, and systemd treats a skipped unit as satisfied for
 # everything ordered after it, so bluefin-cluster-bootstrap.service still runs.
-ConditionPathExists=!/etc/kubernetes/admin.conf
+#
+# The guard is a stamp this unit writes itself, not /etc/kubernetes/admin.conf.
+# admin.conf is not a completion marker: kubeadm writes it in the `kubeconfig`
+# phase, which runs *before* etcd, control-plane, wait-control-plane,
+# mark-control-plane and bootstrap-token. If `kubeadm init` dies after the
+# kubeconfig phase, admin.conf is already on disk, so with the old condition the
+# Restart=on-failure retry below was skipped instead of run, and the node kept a
+# half-initialised control plane forever. The visible symptom was downstream and
+# unhelpful: mark-control-plane never applied the control-plane role label, so
+# the nodeSelector in files/cluster/seed/15-gitd/deployment.yaml never matched
+# and bluefin-cluster-bootstrap phase 3 timed out even though the API server was
+# answering.
+#
+# ExecStartPost writes the stamp only after kubeadm exits 0, so the condition
+# now means "a previous init ran to completion" rather than "some init got as
+# far as writing a kubeconfig".
+ConditionPathExists=!/var/lib/bluefin/kubeadm-init.stamp
 # Both /usr/bin/kubeadm and containerd.service arrive with the sysext merge, but
 # from two different extensions, each seeded to /var/lib/extensions by
 # files/installer/repart.d/30-var.conf:
@@ -58,6 +74,7 @@ After=containerd.service
 Wants=network-online.target
 After=network-online.target
 RequiresMountsFor=/var/lib/kubelet
+RequiresMountsFor=/var/lib/bluefin
 
 [Service]
 Type=oneshot
@@ -94,9 +111,22 @@ TimeoutStartSec=900
 # runtime". Exiting non-zero hands it to Restart=on-failure with a line that
 # names the cause, and still leaves kubeadm the larger share of the budget.
 ExecStartPre=/usr/bin/bash -c 'for i in $(seq 300); do [ -S /run/containerd/containerd.sock ] && exit 0; sleep 1; done; echo "no CRI socket at /run/containerd/containerd.sock after 300s; containerd.service did not start" >&2; exit 1'
+# Clear a half-initialised node before retrying. Reaching this point with
+# /etc/kubernetes/admin.conf already present means a previous attempt wrote a
+# kubeconfig and then failed before the stamp was written — kubeadm refuses to
+# run against that state ("ERROR Port-6443 ... /etc/kubernetes/manifests is not
+# empty"), so every retry would fail the same way forever. `kubeadm reset -f`
+# tears down the manifests, etcd data and kubeconfigs so the next ExecStart is a
+# clean first init. It is a no-op path on a genuinely first boot, where
+# admin.conf does not exist.
+ExecStartPre=/usr/bin/bash -c '[ -e /etc/kubernetes/admin.conf ] || exit 0; echo "found /etc/kubernetes/admin.conf with no completion stamp: a previous kubeadm init did not finish; resetting before retry" >&2; /usr/bin/kubeadm reset -f'
 # Cilium provides the kube-proxy replacement; installing kube-proxy as well
 # would leave two datapaths fighting over the same Services.
 ExecStart=/usr/bin/kubeadm init --config /usr/share/bluefin/kubeadm.yaml --skip-phases=addon/kube-proxy
+# The completion stamp the ConditionPathExists above reads. ExecStartPost only
+# runs when every ExecStart succeeded, which is what makes the stamp mean
+# "kubeadm init ran to completion" and not merely "kubeadm init was attempted".
+ExecStartPost=/usr/bin/bash -c 'mkdir -p /var/lib/bluefin && : > /var/lib/bluefin/kubeadm-init.stamp'
 
 [Install]
 WantedBy=multi-user.target

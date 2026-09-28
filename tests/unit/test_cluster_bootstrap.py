@@ -110,7 +110,9 @@ def test_preset_enables_exactly_the_units_that_are_shipped() -> None:
 def test_the_idempotency_guard_lives_on_kubeadm_init_alone() -> None:
     """A skipped unit satisfies its dependents; a skipped seed is a dead node."""
     init = unit(KUBEADM_INIT)
-    assert init["Unit"]["ConditionPathExists"] == ["!/etc/kubernetes/admin.conf"]
+    assert init["Unit"]["ConditionPathExists"] == [
+        "!/var/lib/bluefin/kubeadm-init.stamp"
+    ]
 
     for path in (CLUSTER_BOOTSTRAP,):
         guards = [
@@ -122,6 +124,32 @@ def test_the_idempotency_guard_lives_on_kubeadm_init_alone() -> None:
             f"{path.name} carries {guards}; a failed condition marks the unit "
             "skipped rather than failed, silently no-opping the first boot seed"
         )
+
+
+def test_the_guard_is_a_completion_stamp_not_a_mid_run_artefact() -> None:
+    """admin.conf lands in kubeadm's `kubeconfig` phase, long before the control
+    plane is up and the control-plane role label is applied. Guarding on it made
+    Restart=on-failure skip the retry of a half-initialised node, which showed up
+    downstream as the 15-gitd nodeSelector never matching."""
+    service = unit(KUBEADM_INIT)["Service"]
+
+    guard = unit(KUBEADM_INIT)["Unit"]["ConditionPathExists"][0].removeprefix("!")
+    post = service.get("ExecStartPost", [])
+    assert any(guard in line for line in post), (
+        f"nothing writes {guard}, so the condition can never become true and "
+        "kubeadm init would re-run on every boot"
+    )
+
+    pre = service.get("ExecStartPre", [])
+    assert any("kubeadm reset -f" in line for line in pre), (
+        "a retry that finds /etc/kubernetes/admin.conf from a failed attempt "
+        "must reset first; kubeadm refuses to init over a populated "
+        "/etc/kubernetes/manifests, so every retry would fail identically"
+    )
+    assert any(
+        "kubeadm reset -f" in line and "/etc/kubernetes/admin.conf" in line
+        for line in pre
+    ), "the reset must be conditional on the half-initialised state, not unconditional"
 
 
 def test_kubeadm_init_waits_for_the_sysext_merge_and_the_runtime() -> None:

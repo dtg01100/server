@@ -4,12 +4,11 @@
   <img alt="Bluefin Server" src="https://raw.githubusercontent.com/projectbluefin/artwork/main/assets/vector/logos/bluefin-server/bluefin-server-logo-light.svg" width="400">
 </picture>
 
-# Bluefin Server
 > Amargasaurus cazaui
 
-**An FSDK-based, image-based Linux server OS.**
+**An image-based Linux server OS built on a Flatcar base.**
 
-Bluefin Server targets the same use-case space as Flatcar Container Linux, Fedora CoreOS, and Talos, but is built from scratch with [BuildStream 2](https://buildstream.build/) from [freedesktop-sdk](https://freedesktop-sdk.freedesktop.org/) (FSDK 26.08) components and uutils coreutils.
+Bluefin Server targets the same use-case space as Flatcar Container Linux, Fedora CoreOS, and Talos, and is built with [BuildStream 2](https://buildstream.build/). The installed OS payload lands on a single-ABI [Flatcar](https://flatcar-linux.net/) `/usr` (projectbluefin/server#131); the offline installer still composes its userspace from [freedesktop-sdk](https://freedesktop-sdk.freedesktop.org/) (FSDK 26.08) so it keeps `systemd-sysinstall`, which Flatcar does not ship.
 
 It is [DDI first](https://0pointer.net/blog/fitting-everything-together.html): the OS payload is a compressed XFS DDI filesystem image that is deployed by an offline, systemd-native installer.
 
@@ -20,7 +19,7 @@ It is [DDI first](https://0pointer.net/blog/fitting-everything-together.html): t
 ## Release status: Alpha
 
 Bluefin Server is currently in **Alpha**:
-- **Milestone status**: Phase A (reproducible build path, uutils, Kubernetes sysext, graph validation) is complete. Phase B (automated boot verification on lab cluster) is in progress.
+- **Milestone status**: Phase A (reproducible build path, uutils, k0s sysext, graph validation) is complete. Phase B (automated boot verification on lab cluster) is in progress.
 - **Trust model**: Releases include cryptographic provenance with GPG-signed `SHA256SUMS` manifests and in-tree `systemd-sysupdate` verification configurations.
 - **Suitability**: Alpha builds are intended for evaluation, testing, and factory validation. Not yet recommended for production workloads.
 - **Readiness roadmap**: Track completed criteria and remaining gates toward 1.0 in [`docs/MVP_1_0_READINESS.md`](docs/MVP_1_0_READINESS.md).
@@ -29,9 +28,9 @@ Bluefin Server is currently in **Alpha**:
 
 - **Image-based updates and atomic rollbacks** via A/B partition slots and `systemd-sysupdate`.
 - **DDI-first delivery** — the installer embeds the OS payload as a data partition; no network is required at install time.
-- **Streamlined base OS image** — modern userspace with uutils coreutils and bash for interactive login and diagnostics.
+- **Streamlined base OS image** — modern Flatcar userspace with bash for interactive login and diagnostics.
 - **systemd-native installer** — `systemd-sysinstall` provides the interactive terminal UI and `systemd-repart` handles partitioning and block-copy DDI placement.
-- **Optional upstream Kubernetes as a `systemd-sysext`** so the base image stays minimal.
+- **Optional k0s as a `systemd-sysext`** so the base image stays minimal.
 
 > **Remote diagnostics:** OpenSSH is installed for on-demand diagnostics, but is disabled by default via systemd presets. It can be started manually with `systemctl start sshd` when remote access is needed. See [`docs/skills/factory-integration.md`](docs/skills/factory-integration.md).
 

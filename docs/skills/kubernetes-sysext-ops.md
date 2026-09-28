@@ -4,7 +4,7 @@ description: Operator runbook for the Kubernetes systemd-sysext — kubeadm brin
 metadata:
   type: how-to
   status: stable
-  last_updated: "2026-09-19"
+  last_updated: "2026-09-28"
   context7-sources:
     - /systemd/systemd
 ---
@@ -27,12 +27,38 @@ kubeadm-init.service              kubeadm init --config /usr/share/bluefin/kubea
 bluefin-cluster-bootstrap.service apply the four seed phases in order
 ```
 
-`kubeadm-init.service` carries `ConditionPathExists=!/etc/kubernetes/admin.conf`, so it
-is a no-op on an already-initialised host. `bluefin-cluster-bootstrap.service` carries no
-such condition on purpose: a failed condition marks a unit *skipped* rather than *failed*,
-which would silently no-op the first boot.
+`kubeadm-init.service` carries `ConditionPathExists=!/var/lib/bluefin/kubeadm-init.stamp`,
+so it is a no-op on an already-initialised host. The stamp is written by
+`ExecStartPost`, i.e. only after `kubeadm init` exits 0. `/etc/kubernetes/admin.conf`
+deliberately is *not* the guard: kubeadm writes it in the `kubeconfig` phase, before
+etcd, the control plane and `mark-control-plane`, so guarding on it made
+`Restart=on-failure` skip the retry of a node that never got its control-plane role
+label. A retry that finds `admin.conf` without the stamp runs `kubeadm reset -f` first,
+because kubeadm refuses to init over a populated `/etc/kubernetes/manifests`.
+`bluefin-cluster-bootstrap.service` carries no condition at all on purpose: a failed
+condition marks a unit *skipped* rather than *failed*, which would silently no-op the
+first boot.
+
+To force a full re-init on a live host, remove the stamp and reset:
+
+```bash
+kubeadm reset -f
+rm -f /var/lib/bluefin/kubeadm-init.stamp
+systemctl start kubeadm-init.service
+```
 
 ## Enabling Kubernetes on a Host
+
+> **Reinstall only.** These steps apply to a Bluefin Server host installed from a DDI
+> that already carries the container runtime. `containerd-flatcar.raw` is seeded into
+> `/var/lib/extensions` at install time by `files/installer/repart.d/30-var.conf`; it is
+> **not** published as a release asset and has no `sysupdate.containerd.d` transfer, so
+> `systemd-sysupdate --component=kubernetes update` cannot deliver it. A host still
+> running the old k0s image therefore cannot be migrated in place — it would end up with
+> `kubelet.service` and `kubeadm-init.service` and no runtime, and `kubeadm-init` would
+> sit in its CRI-socket wait until it timed out. Reinstall such hosts from the current
+> DDI. Publishing containerd on its own transfer is tracked as open item 3 in
+> `docs/superpowers/specs/2026-09-19-kubernetes-cutover-design.md`.
 
 On a running Bluefin Server system:
 

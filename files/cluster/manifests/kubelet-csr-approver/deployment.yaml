@@ -44,9 +44,14 @@ spec:
             # because a silent bump to it would widen what gets approved.
             - name: ALLOWED_DNS_NAMES
               value: "1"
-            # 30 days. Upstream's default is 367 days; bounding it hard means a
-            # serving certificate issued to a node that is later removed stops
-            # being useful in a month rather than a year.
+            # A ceiling on what a CSR may *ask* for, not the lifetime nodes get.
+            # kubelet-csr-approver only denies CSRs whose spec.expirationSeconds
+            # exceeds this; the kubelet sets no expirationSeconds on its serving
+            # CSR, so those are issued for kube-controller-manager's
+            # --cluster-signing-duration (1y by default) regardless of the value
+            # here. It is kept as a hard bound on anything that does request a
+            # duration — shortening the actual serving-certificate lifetime
+            # means setting --cluster-signing-duration on the signer.
             - name: MAX_EXPIRATION_SEC
               value: "2592000"
             # The appliance has no authoritative DNS for its own node name, so
