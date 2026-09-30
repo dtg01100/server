@@ -8,89 +8,66 @@ metadata:
 ---
 # NVIDIA sysexts
 
-Use this skill when working on the NVIDIA driver and toolkit sysexts
-shipped as opt-in overlays for Bluefin Server.
+Use this skill when working on the NVIDIA driver and toolkit sysexts shipped
+as opt-in overlays for Bluefin Server. How extensions load, merge and reach
+nodes, these two included, is canonical in
+[systemd-sysext-extensions.md](systemd-sysext-extensions.md); this skill covers
+what is specific to NVIDIA: flavours, bumps, and container runtimes.
 
 ## When to Use
 
-- Bumping the pinned version or SHA256 of an NVIDIA driver flavour
-  (`include/nvidia.yml`) or the NVIDIA Container Toolkit
-  (`include/nvidia-container-toolkit.yml`).
-- Adding a new driver flavour (e.g. `nvidia-open-615`).
-- Modifying the kernel modules, headless userspace, units, or modprobe /
-  sysusers / tmpfiles drop-ins in `files/nvidia/sysext/`.
-- Modifying the toolkit contents in `files/nvidia-container-toolkit/sysext/`
-  or its activation units.
-- Changing the `nvidia-open-<branch>` sysupdate feature / transfer, or the
-  `nvidia-container-toolkit` sysupdate transfer.
-- Wiring containerd / Kubernetes to the toolkit's CDI spec on a node.
+- Bumping an NVIDIA driver flavour (`include/nvidia.yml`) or the NVIDIA
+  Container Toolkit (`include/nvidia-container-toolkit.yml` and the `ref:` in
+  `elements/nvidia/nvidia-container-toolkit.bst`).
+- Adding a driver flavour for a new NVIDIA branch (e.g. `nvidia-open-615`).
+- Changing the shared recipe (`include/nvidia-driver.yml`), the units and
+  drop-ins in `files/nvidia/sysext/`, or the toolkit's drop-in in
+  `files/nvidia-container-toolkit/sysext/`.
+- Changing the `nvidia-open-<branch>` sysupdate feature and transfer, or the
+  `nvidia-container-toolkit` sysupdate component.
+- Wiring containerd or the GPU Operator to a Bluefin GPU node.
 
 ## When NOT to Use
 
-- General sysext loading mechanics (use `systemd-sysext-extensions.md`).
-- General sysupdate framing and signing (use `systemd-sysupdate-verification.md`).
-- Boot / install / update architecture (use `ddi-installer.md`).
-- k0s, kubeadm, kubestellar, or ZFS sysexts (use their own skills).
+- Extension identity, merging, delivery, and the kernel-module loader
+  `bluefin-sysext-modules`: [systemd-sysext-extensions.md](systemd-sysext-extensions.md).
+- Sysupdate features, components and signing:
+  [systemd-sysupdate-verification.md](systemd-sysupdate-verification.md).
+- Choosing sysexts per node with Booty: [booty-integration.md](booty-integration.md).
+- Other sysexts: [k0s-sysext.md](k0s-sysext.md), [kubeadm-sysext.md](kubeadm-sysext.md);
+  ZFS and KubeStellar live in systemd-sysext-extensions.md.
 
-## Architecture
+## What ships
 
-Bluefin Server's base /usr image includes only what every node needs;
-GPU-specific code ships as opt-in `systemd-sysext` overlays. Two extension
-images cover the NVIDIA stack:
-
-| Sysext | Image name | Locked to | Purpose |
+| Sysext | Release asset | Version | Contents |
 | --- | --- | --- | --- |
-| Driver (open kernel modules) | `nvidia-open-<branch>_<image-version>.raw.zst` | image version | The kernel modules (signed, zstd-compressed) and the headless userspace, GSP firmware and license. |
-| Container Toolkit (CDI) | `nvidia-container-toolkit-<ctk-ver>.raw.zst` | own axis (`ID=_any`) | `nvidia-ctk`, `nvidia-cdi-hook` and the upstream `nvidia-cdi-refresh.{service,path}`. Writes `/var/run/cdi/nvidia.yaml` at boot for containerd. |
+| Driver flavour | `nvidia-open-<branch>_<image-version>.raw.zst` | Locked to the image (`ID=bluefin-server`, `VERSION_ID=<image-version>`) | The open kernel modules (signed, zstd-compressed), the headless userspace, GSP firmware, NVIDIA's license, and the units and modprobe / sysusers / tmpfiles drop-ins every flavour shares. |
+| Container Toolkit | `nvidia-container-toolkit-<ctk-ver>.raw.zst` | Own axis (`ID=_any`), like k0s | `nvidia-ctk`, `nvidia-cdi-hook` and upstream's `nvidia-cdi-refresh.{service,path}`, with upstream's drop-in and a Bluefin one. CDI only: no `nvidia-container-runtime`, OCI hook or `libnvidia-container`. |
 
-Both sysexts are opt-in: nothing in the base image enables or ships them,
-and `80-bluefin-opt-in.preset` disables the toolkit activation unit. The
-recipe and unit layout are shared across all driver flavours; each flavour
-adds one row to the flavour table in `include/nvidia.yml` and three
-elements (`elements/nvidia/<flavour>.bst`, `-signed.bst`,
-`elements/oci/<flavour>-sysext.bst`).
+Both are opt-in: nothing in the base image ships or enables them.
 
 ### Open kernel modules only (Turing and newer)
 
-Only the open kernel modules are built — the closed `kernel/` tree is
-never compiled. The shared recipe in `include/nvidia-driver.yml` enforces
-this: `make -C payload/kernel-open` is the only module build target. The
-following modules ship:
+- Only `kernel-open/` is built (`make -C payload/kernel-open`), never the
+  closed `kernel/` tree, so a flavour drives Turing and newer GPUs only. The
+  modules are `nvidia nvidia-uvm nvidia-modeset nvidia-drm`; `nvidia-peermem`
+  is left out, because it serves GPUDirect RDMA over InfiniBand, which the
+  FSDK kernel lacks.
+- The `.run` is never executed: the build unpacks its payload after the
+  makeself prologue and checks that the payload's `.manifest` names the
+  pinned version.
+- The userspace is headless: the `nvidia-libs` and `nvidia-tools` lists in
+  `include/nvidia-driver.yml`, and no 32-bit libraries, X driver,
+  `nvidia-settings`, `libglvnd`, OpenCL ICD loader, NGX, OptiX, VDPAU, NvFBC,
+  VulkanSC or `nvidia-powerd`. NVIDIA's binaries ship byte-for-byte
+  (`strip-binaries` is empty). The install fails when a shipped ELF needs a
+  library that neither the sysext nor `nvidia-external-needed` provides, so a
+  library NVIDIA splits out in a later release breaks the build, not a node.
 
-```
-nvidia nvidia-uvm nvidia-modeset nvidia-drm
-```
+## Flavours
 
-`nvidia-peermem` is intentionally left out: it requires GPUDirect RDMA
-over InfiniBand, which the FSDK kernel does not carry.
-
-The headless userspace (no X driver, no `nvidia-settings`, no `libglvnd`,
-no NGX / OptiX / VDPAU / NvFBC / VulkanSC / `nvidia-powerd`) is the
-whitelist in `include/nvidia-driver.yml` (`nvidia-libs` and
-`nvidia-tools`). The install command refuses to ship anything whose
-`DT_NEEDED` it cannot provide from the sysext or `nvidia-external-needed`,
-so an NVIDIA library split out in a future release breaks the build
-loudly rather than silently linking against a missing symbol.
-
-### Image-locked driver, version-axised toolkit
-
-The driver sysext is image-locked the same way the ZFS sysext is
-(`extension-release.nvidia-open-<branch>_<image-version>`,
-`ID=bluefin-server`, `VERSION_ID=<image-version>`): the kernel modules
-only load on the kernel they were built against. Several driver versions
-sit side by side in `/var/lib/extensions` and `systemd-sysext` merges
-only the one matching the booted image, so an A/B rollback keeps its
-NVIDIA driver.
-
-The toolkit has no kernel ABI: like k0s it uses
-`ID=_any` and its own version, merged under the stable name
-`nvidia-container-toolkit.raw` from `/var/lib/nvidia-container-toolkit/`.
-
-## Flavour table
-
-`include/nvidia.yml` is the single source of truth for driver flavours.
-One comment line separates each flavour's two atoms (`-version`,
-`-sha256`) so per-flavour pull requests never edit adjacent lines:
+`include/nvidia.yml` is the only list of flavours. Each flavour is a comment
+line and two atoms, so per-flavour pull requests never edit adjacent lines:
 
 ```yaml
 variables:
@@ -99,191 +76,191 @@ variables:
   nvidia-open-595-sha256: "e421c202e4c79f58c3c7f3161bbe71454ebb3d88936f88205a0e327cd04c59ca"
 ```
 
-The version is the directory under
-`https://download.nvidia.com/XFree86/Linux-x86_64/<version>/`, and the
-sha256 is the digest of `NVIDIA-Linux-x86_64-<version>.run`. NVIDIA
-publishes `<file>.sha256sum` next to each `.run`; the tracker (see
-"Tracking" below) verifies the digest against that file and against the
-downloaded bytes.
+The version is NVIDIA's directory under
+`https://download.nvidia.com/XFree86/Linux-x86_64/`, and the sha256 is that of
+`NVIDIA-Linux-x86_64-<version>.run`, as NVIDIA publishes it in
+`<file>.sha256sum` next to the `.run`. The driver element's `ref:` reads the
+sha256 atom, so a bump edits `include/nvidia.yml` only.
+
+A node runs one flavour. When more than one `nvidia-open-*` extension is
+merged, `nvidia-flavour-guard.service` fails and `nvidia-load.service`, which
+requires it, loads nothing: every flavour installs the same module, binary
+and library-link paths, so two merged flavours would shadow each other.
+Booty refuses a second flavour per host up front. A flavour and the ZFS
+sysext merge together (see the kernel-module sysexts in
+systemd-sysext-extensions.md). Moving a node to a new branch means adding a
+flavour, overlapping, then retiring the old one.
 
 ### Adding a flavour
 
-Adding a driver branch is purely additive — no existing file moves — but
-it is not free: each flavour adds roughly 180 MB to the release set.
-Pick a branch NVIDIA actually publishes; do not invent one.
+Only add a branch NVIDIA publishes. Every flavour enlarges every release set
+and image build; [ci-tooling.md](ci-tooling.md) has the cost of one.
 
-1. Add two atoms to `include/nvidia.yml` (new comment line, new
-   `<flavour>-version`, new `<flavour>-sha256`).
-2. Copy the three element files for the existing flavour and rename:
-   - `elements/nvidia/<flavour>.bst`
-   - `elements/nvidia/<flavour>-signed.bst`
-   - `elements/oci/<flavour>-sysext.bst`
-3. Each element must:
-   - include `include/nvidia.yml` and `include/nvidia-driver.yml`;
-   - set `nvidia-flavour: <flavour>` and
-     `nvidia-version: "%{<flavour>-version}"`;
-   - reference `bluefin-server/kernel-modules.bst` (the
-     `<flavour>-sysext.bst` element only).
-4. Add the new flavour to the signed release set in
-   `elements/oci/bluefin-server-image.bst` (the list of sysexts to
-   stage alongside `bluefin-server_<ver>.raw`).
-5. Add the matching sysupdate feature and transfer:
-   - `files/os/sysupdate.d/<flavour>.feature` (`[Feature]`,
-     `Description=...`; cannot be combined with `zfs`).
-   - `files/os/sysupdate.d/<NN>-<flavour>.transfer` — copy
-     `33-nvidia-open-595.transfer` and replace the flavour strings.
-6. Add `just build-nvidia-sysext` / `export-nvidia-sysext` /
-   `dogfood-nvidia` invocations for the new flavour to the
-   `[group('sysext')]` recipes in the Justfile.
-7. Update `tests/unit/test_nvidia_sysext.py`: the `flavours()` helper
-   reads the table from `include/nvidia.yml`, so adding a flavour makes
-   every parametrized test run for it automatically.
+1. `include/nvidia.yml`: a comment line and the two atoms
+   `<flavour>-version` and `<flavour>-sha256`.
+2. Copy `elements/nvidia/nvidia-open-595.bst`,
+   `elements/nvidia/nvidia-open-595-signed.bst` and
+   `elements/oci/nvidia-open-595-sysext.bst` to the new flavour's names and
+   replace `nvidia-open-595` throughout: `nvidia-flavour`, `nvidia-version`,
+   the `ref:` atom, the `sysext-*` variables, and the dependencies between
+   the three.
+3. `elements/oci/bluefin-server-image.bst`: stage `oci/<flavour>-sysext.bst`
+   and add its `<flavour>_%{image-version}.raw.zst` to the signed set;
+   `scripts/publish-release.sh`: expect the new asset.
+4. `files/os/sysupdate.d/`: a `<flavour>.feature` and a
+   `<NN>-<flavour>.transfer`, copied from `nvidia-open-595.feature` and
+   `33-nvidia-open-595.transfer`.
+5. `Justfile`: add `oci/<flavour>-sysext.bst` to the graph `just validate`
+   resolves. `build-nvidia-sysext`, `export-nvidia-sysext` and
+   `dogfood-nvidia` take the flavour as their argument.
+6. `.github/scripts/track-binaries.py`: register
+   `NvidiaDriverComponent("<flavour>")` in `COMPONENTS`.
+7. `tests/unit/test_nvidia_sysext.py`: update the flavour list that
+   `test_flavour_table_matches_the_element_files` pins; the other tests there
+   read `include/nvidia.yml` and run for every flavour.
 
-`tests/unit/test_nvidia_sysext.py` is the merge-contract: every test
-runs for every flavour, so a half-done step (no element, no transfer,
-no signed-release-set entry) fails there first.
+Booty accepts any `nvidia-open-<branch>`, so nothing changes there. A missed
+step fails `tests/unit/test_nvidia_sysext.py` (elements, signed release set,
+`publish-release.sh`, feature and transfer, Justfile) or
+`tests/unit/test_track_binaries.py` (every flavour tracked).
+
+## Bumping
+
+### Driver
+
+`.github/workflows/track-binaries.yml` runs `.github/scripts/track-binaries.py`
+daily ([ci-tooling.md](ci-tooling.md)). For each flavour it reads NVIDIA's
+directory index; a newer release of the flavour's branch counts once its
+`.run` and `.run.sha256sum` are both there, and `check` never downloads a
+`.run`. It then opens one pull request per flavour that moves both atoms,
+with the sha256 read from NVIDIA's `.run.sha256sum` and confirmed against the
+downloaded `.run`. To move to a given release of the branch by hand, with the
+same verification:
+
+```bash
+python3 .github/scripts/track-binaries.py apply nvidia-open-595 --version 595.<x>.<y>
+```
+
+The tracker refuses a version outside the flavour's branch: a new branch is a
+new flavour.
+
+### Container Toolkit
+
+The toolkit is bumped by hand and is not tracked. Its element builds from
+GitHub's auto-generated tag archive
+(`archive/refs/tags/v<version>.tar.gz`), and NVIDIA publishes no checksum
+for that archive, so a bump cannot be verified against a checksum upstream
+publishes, and the tracker writes nothing it cannot verify that way. To bump:
+
+1. Set `nvidia-container-toolkit-version` in
+   `include/nvidia-container-toolkit.yml`.
+2. Put the sha256 of
+   `https://github.com/NVIDIA/nvidia-container-toolkit/archive/refs/tags/v<version>.tar.gz`
+   in the `ref:` of `elements/nvidia/nvidia-container-toolkit.bst`;
+   BuildStream checks every fetch against it.
+3. Compare upstream's `deployments/systemd/` units for the new release with
+   `files/nvidia-container-toolkit/sysext/nvidia-cdi-refresh-bluefin.conf`,
+   which replaces upstream's `ExecCondition=`.
+
+## GPU nodes
+
+### Choosing the sysexts
+
+- Installed node: enable the `nvidia-open-<branch>` sysupdate feature
+  ([systemd-sysupdate-verification.md](systemd-sysupdate-verification.md)) and
+  `nvidia-container-toolkit-activate.service` (systemd-sysext-extensions.md).
+- Booty: list `nvidia-open-<branch>` and `nvidia-container-toolkit` in the
+  host's `extensions` ([booty-integration.md](booty-integration.md)).
+
+A node without an NVIDIA GPU can merge both. `nvidia-load.service` skips
+itself (its `ExecCondition=` finds no PCI display controller, class `0x03`,
+from vendor `0x10de`), `nvidia-device-nodes.service` and
+`nvidia-persistenced.service` then skip on their conditions, and the
+toolkit's drop-in skips `nvidia-cdi-refresh.service` on the same PCI check.
+`nvidia-ldconfig.service` and the flavour guard run on every node.
+
+### Containers (CDI)
+
+Once the toolkit is merged, and after `nvidia-ldconfig.service` and
+`nvidia-device-nodes.service`, `nvidia-cdi-refresh.service` runs
+`nvidia-ctk cdi generate`, which writes `/var/run/cdi/nvidia.yaml`.
+containerd 2.x has CDI on by default and reads that directory; the kubeadm
+sysext's containerd defines only the `runc` runtime, and there is no `nvidia`
+runtime class or OCI hook.
+
+### GPU Operator
+
+The driver and the CDI spec come from the sysexts, so the GPU Operator chart
+installs neither:
+
+```yaml
+driver:
+  enabled: false   # the driver sysext
+toolkit:
+  enabled: false   # the toolkit sysext and its CDI spec
+cdi:
+  enabled: true    # the chart's default since v25.10.0
+```
+
+That is `--set driver.enabled=false --set toolkit.enabled=false --set
+cdi.enabled=true`. Time-slicing and MIG are GPU Operator settings
+(`devicePlugin.config`, `mig.strategy`), not changes to the sysexts.
+
+Not verified yet: with `cdi.enabled=true` and its NRI plugin off (the
+default), the operator still runs its own pods (device plugin, GPU feature
+discovery, DCGM exporter, validator) with `runtimeClassName: nvidia`
+(`operator.runtimeClass`), and no `nvidia` runtime handler is configured.
+How those pods start is settled on real hardware in the GPU rollout, with the
+rest of the GPU-present path that QEMU cannot exercise
+(systemd-sysext-extensions.md).
+
+## Build and test
+
+- Driver: `just build-nvidia-sysext [FLAVOUR]`, `just export-nvidia-sysext
+  [FLAVOUR]` and the QEMU checks `just dogfood-nvidia [FLAVOUR]` and
+  `DOGFOOD_SYSEXT=nvidia` / `zfs,nvidia` with `just dogfood-install`, all in
+  [ddi-installer-build.md](ddi-installer-build.md). `FLAVOUR` defaults to
+  `nvidia-open-595`.
+- Toolkit: `just build-nvidia-container-toolkit-sysext`,
+  `just export-nvidia-container-toolkit-sysext`.
+- Both release assets are in the signed release set
+  ([ddi-installer.md](ddi-installer.md)).
+- Contracts: `tests/unit/test_nvidia_sysext.py` (driver),
+  `tests/unit/test_nvidia_container_toolkit_sysext.py` (toolkit),
+  `tests/unit/test_nvidia_container_toolkit_delivery.py` (toolkit activation
+  and sysupdate), `tests/unit/test_track_binaries.py` (driver tracking).
 
 ## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `include/nvidia.yml` | Single source of truth for the driver flavour table (atoms only). |
-| `include/nvidia-driver.yml` | Shared build / install / sign / stage recipe. |
-| `include/nvidia-container-toolkit.yml` | Single source of truth for the toolkit version axis. |
-| `elements/nvidia/<flavour>.bst` | Driver build element (unsigned, makeself-extracts the `.run`). |
-| `elements/nvidia/<flavour>-signed.bst` | Signs the kernel modules with `linux-module-cert.key`, zstd-compresses them. |
-| `elements/oci/<flavour>-sysext.bst` | Stages the sysext EROFS image with `ID=bluefin-server` and `VERSION_ID=<image-version>`. |
-| `elements/nvidia/nvidia-container-toolkit.bst` | Toolkit build (Go, vendor modules, no network at build time). |
-| `elements/oci/nvidia-container-toolkit-sysext.bst` | Stages the toolkit sysext with `ID=_any`. |
-| `elements/bluefin-server/os-nvidia-container-toolkit-sysupdate.bst` | Stages the toolkit sysupdate transfer and feature directory. |
-| `files/nvidia/sysext/` | Shared driver units (`nvidia-load.service`, `nvidia-flavour-guard.service`, …), modprobe / sysusers / tmpfiles drop-ins, and the `extension-release.nvidia` template. |
-| `files/nvidia-container-toolkit/sysext/` | Toolkit drop-in (`nvidia-cdi-refresh-bluefin.conf`). |
-| `files/os/systemd/system/nvidia-container-toolkit-activate.service` | One-shot that copies the staged toolkit image to `/run/extensions/`, refreshes the merge, and starts `nvidia-cdi-refresh.{path,service}`. |
-| `files/os/systemd/system/nvidia-container-toolkit-fetch.service` | Fetches the toolkit sysext via sysupdate when nothing is staged. |
-| `files/os/sysupdate.d/<flavour>.feature` | Opt-in sysupdate feature for the driver. |
-| `files/os/sysupdate.d/<NN>-<flavour>.transfer` | Driver sysupdate transfer (image-locked, `InstancesMax=2`). |
-| `files/os/sysupdate.nvidia-container-toolkit.d/71-nvidia-container-toolkit.transfer` | Toolkit sysupdate transfer (own version axis, `CurrentSymlink=`). |
-| `files/os/systemd/system-preset/80-bluefin-opt-in.preset` | Disables `nvidia-container-toolkit-activate.service` by default. |
-| `Justfile` | `build-nvidia-sysext`, `export-nvidia-sysext`, `dogfood-nvidia`, `build-nvidia-container-toolkit-sysext`, `export-nvidia-container-toolkit-sysext`. |
-| `scripts/dogfood-nvidia.sh` | QEMU boot that merges the driver sysext and asserts the GPU-less path skips. |
-| `tests/unit/test_nvidia_sysext.py` | Driver-sysext merge contract. |
-| `tests/unit/test_nvidia_container_toolkit_sysext.py` | Toolkit-sysext merge contract. |
-| `tests/unit/test_nvidia_container_toolkit_delivery.py` | Toolkit activation and sysupdate delivery contract. |
-| `.github/scripts/track-binaries.py` | Bumps the toolkit version and the toolkit tarball sha256; `.github/scripts/track-binaries.yml` proposes a PR per component. |
-
-## Per-node selection
-
-A node opts in to the driver by enabling the matching sysupdate feature
-on its installed disk, or by dropping the image into `/var/lib/extensions/`
-on a diskless node. The toolkit opts in by enabling
-`nvidia-container-toolkit-activate.service` (default disabled). Booty's
-`extensions` per-node field renders the matching
-`/etc/extensions/<flavour>_<ver>.raw` (driver) and adds a profile that
-also enables the toolkit activation unit.
-
-A node with no NVIDIA GPU: the driver's
-`nvidia-load.service` (and the rest of the GPU-present units) skip
-themselves via an `ExecCondition` that walks `/sys/bus/pci/devices/` for
-vendor `0x10de` and class `0x03*` (PCI display controllers). The toolkit's
-`nvidia-cdi-refresh.{path,service}` are gated upstream by the same
-condition; a Bluefin drop-in adds a fallback that skips the refresh path
-on a node without an NVIDIA GPU even when the toolkit sysext is merged
-(no `nvidia-smi`). Both sysexts can therefore be merged on a node with
-no GPU without doing anything.
-
-`nvidia-flavour-guard.service` fails the boot when more than one driver
-flavour is merged: the kernel modules ship without a
-`modules.dep` index (see `systemd-sysext-extensions.md`), so two flavours
-loaded side by side would be ambiguous. The guard reads
-`/usr/lib/extension-release.d/extension-release.nvidia-open-*` and
-asserts exactly one entry.
-
-## GPU Operator values
-
-The GPU Operator manages its own node labelling and runtime configuration
-on top of the toolkit's CDI spec. The two settings the toolkit's CDI
-mode expects are:
-
-```yaml
-# In nvidia-container-toolkit values.yaml, or equivalent runtime config:
-nvidiaDriver:
-  enabled: false
-nvidiaContainerToolkit:
-  enabled: false
-cdi:
-  enabled: true
-```
-
-`nvidia-smi`, CUDA workloads, NVENC/NVDEC, and `dcgm-exporter` all run
-through the toolkit's CDI spec at `/var/run/cdi/nvidia.yaml`, which
-`nvidia-cdi-refresh.service` regenerates at every path device event and
-at boot. containerd (CRI plugin in containerd 2.x, CDI on by default)
-reads it automatically; no `nvidia` runtime class or OCI hook is
-installed — none of `nvidia-container-runtime`,
-`nvidia-container-runtime-hook` or `libnvidia-container` ships.
-
-For time-slicing or MIG partitioning, configure those via
-`nvidia-ctk cdi generate` arguments or the GPU Operator's
-`gpu-operator-values` (which writes the CDI spec), not by editing the
-sysext.
-
-## Build outputs and commands
-
-```bash
-just validate                       # resolve the element graph
-just build-nvidia-sysext FLAVOUR=nvidia-open-595
-just export-nvidia-sysext FLAVOUR=nvidia-open-595
-just build-nvidia-container-toolkit-sysext
-just export-nvidia-container-toolkit-sysext
-just dogfood-nvidia                 # QEMU boot, no GPU; asserts skip, not fail
-DOGFOOD_SYSEXT=nvidia scripts/dogfood-install.sh  # full A/B + rollback with both NVIDIA sysexts
-```
-
-`just export-image` produces the full signed release set, including
-`nvidia-open-595_<ver>.raw.zst` and
-`nvidia-container-toolkit-<ctk-ver>.raw.zst` next to
-`bluefin-server_<ver>.raw`.
-
-## Tracking
-
-`.github/scripts/track-binaries.py` tracks two NVIDIA components:
-
-- `nvidia-container-toolkit`: patches the toolkit tarball sha256 in
-  `elements/nvidia/nvidia-container-toolkit.bst` and bumps the
-  `nvidia-container-toolkit-version` atom in
-  `include/nvidia-container-toolkit.yml`, on every new release of
-  `NVIDIA/nvidia-container-toolkit`.
-- `nvidia-open-595`: patches the `.run` sha256 in
-  `include/nvidia.yml` to the latest 595.x.x release, by parsing
-  the directory listing at
-  `https://download.nvidia.com/XFree86/Linux-x86_64/`.
-
-Both verify the sha256 from the checksum file NVIDIA publishes next to
-the asset (`<file>.sha256sum`) and against the downloaded bytes, the
-same as every other tracked component. A minor bump (moving to a
-different NVIDIA branch) is a manual
-`apply <component> --version <branch>.<x>.<x>` and a new row in the
-flavour table — never an automated PR.
-
-The GPU-present path (`nvidia-smi`, GPU Operator validator, time-slicing,
-CUDA, NVENC/NVDEC, `dcgm-exporter`) is not exercised by
-`just dogfood-nvidia` (QEMU has no NVIDIA GPU) and is verified on real
-hardware during the GPU rollout phase.
+| `include/nvidia.yml` | The flavours: version and sha256 atoms. |
+| `include/nvidia-driver.yml` | Shared build, install, sign and stage recipe. |
+| `include/nvidia-container-toolkit.yml` | The toolkit version. |
+| `elements/nvidia/<flavour>.bst` | Driver build: unpacks the `.run` payload, builds `kernel-open/`, unsigned. |
+| `elements/nvidia/<flavour>-signed.bst` | Signs the modules (sha512, `linux-module-cert.key`) and zstd-compresses them. |
+| `elements/oci/<flavour>-sysext.bst` | The image-locked EROFS sysext. |
+| `elements/nvidia/nvidia-container-toolkit.bst` | Toolkit build: Go with the release's vendored modules, no network. |
+| `elements/oci/nvidia-container-toolkit-sysext.bst` | The `ID=_any` toolkit sysext. |
+| `elements/bluefin-server/os-nvidia-container-toolkit-sysupdate.bst` | Installs the toolkit's sysupdate component, `/usr/lib/sysupdate.nvidia-container-toolkit.d/`. |
+| `files/nvidia/sysext/` | Driver units (`nvidia-flavour-guard`, `nvidia-load`, `nvidia-device-nodes`, `nvidia-ldconfig`, `nvidia-persistenced`), modprobe / sysusers / tmpfiles drop-ins, `extension-release.nvidia` template. |
+| `files/nvidia-container-toolkit/sysext/` | Toolkit extension-release and the `nvidia-cdi-refresh.service` drop-in. |
+| `files/os/systemd/system/nvidia-container-toolkit-{activate,fetch}.service` | Opt-in toolkit activation on installed nodes, disabled by `80-bluefin-opt-in.preset`. |
+| `files/os/sysupdate.d/<flavour>.feature`, `<NN>-<flavour>.transfer` | The driver's opt-in sysupdate feature and its image-locked transfer. |
+| `files/os/sysupdate.nvidia-container-toolkit.d/` | The toolkit's sysupdate transfer (own version axis). |
+| `scripts/dogfood-nvidia.sh` | QEMU: merge a driver sysext on a disk install without a GPU and probe it. |
 
 ## See also
 
 - [systemd-sysext-extensions.md](systemd-sysext-extensions.md) — extension
-  loading, kernel-module sysext rules, `bluefin-sysext-modules`.
+  identity, delivery, `bluefin-sysext-modules`, the GPU-present path.
 - [systemd-sysupdate-verification.md](systemd-sysupdate-verification.md) —
-  sysupdate transfer / feature syntax, signing, and rollback.
-- [k0s-sysext.md](k0s-sysext.md) — sibling sysext, also `ID=_any` on its
-  own version axis.
-- [booty-integration.md](booty-integration.md) — per-node `extensions`
-  field, install profile.
-- [skill-improvement.md](skill-improvement.md) — front-matter schema, how
-  to update this skill.
+  features, components, signing.
+- [booty-integration.md](booty-integration.md) — per-host `extensions`.
+- [ddi-installer-build.md](ddi-installer-build.md) — build and dogfood
+  commands.
+- [ci-tooling.md](ci-tooling.md) — `track-binaries.yml` and the build cost.
+- [k0s-sysext.md](k0s-sysext.md) — the other `ID=_any` sysext.
+- [skill-improvement.md](skill-improvement.md) — how to update this skill.
 - [CONTEXT.md](../../CONTEXT.md) — canonical project domain glossary.
-- [projectbluefin/common nvidia skill](https://github.com/projectbluefin/common/blob/main/docs/skills/nvidia.md)
-  — desktop / open-distro NVIDIA policy this server-side policy inherits
-  from (Turing+, open kernel modules only, same whitelist).
-- `systemd-sysext(8)`, `nvidia-ctk(1)`, `systemd-sysupdate(8)`.
+- `systemd-sysext(8)`, `systemd-sysupdate(8)`, `nvidia-ctk cdi generate --help`.
