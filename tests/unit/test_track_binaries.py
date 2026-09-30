@@ -561,6 +561,8 @@ def test_real_pins_are_readable(name):
     assert pins
     for pin in pins:
         assert pin.url.startswith("https://") and "%{" not in pin.url
+        # Nothing is written unless it verifies against a checksum upstream publishes.
+        assert pin.sums.startswith("https://") and pin.sums != pin.url, pin
         assert track.SUMS_LINE_RE.match(track.read_pin(tree, pin)), pin
 
 
@@ -599,19 +601,6 @@ sources:
 
 variables:
   nvidia-version: "%{nvidia-open-595-version}"
-""",
-    "include/nvidia-container-toolkit.yml": """variables:
-  nvidia-container-toolkit-version: "1.20.1"
-""",
-    "elements/nvidia/nvidia-container-toolkit.bst": """kind: manual
-
-(@):
-- include/nvidia-container-toolkit.yml
-
-sources:
-- kind: tar
-  url: github:NVIDIA/nvidia-container-toolkit/archive/refs/tags/v%{nvidia-container-toolkit-version}.tar.gz
-  ref: 1c5b0f17bd3f56f3d1faa0ddaba8fa0c606fc416aeaf0ee0953265a438fab647
 """,
 }
 
@@ -680,30 +669,6 @@ def test_nvidia_driver_refuses_to_write_a_tampered_run(repo, upstream, tmp_path,
 
     assert snapshot(repo, NVIDIA_FILES) == before
     assert f"{NVIDIA_INDEX}{new}/NVIDIA-Linux-x86_64-{new}.run hashes to" in capsys.readouterr().err
-
-
-def test_nvidia_container_toolkit_bumps_the_version_and_computes_the_sha(repo, upstream, tmp_path):
-    new_version = "1.20.2"
-    write_repo(repo, NVIDIA_FILES)
-    upstream.releases(
-        "NVIDIA/nvidia-container-toolkit",
-        [release(f"v{new_version}", f"nvidia-container-toolkit_{new_version}_deb_amd64.tar.gz")],
-        [release("v1.20.1", f"nvidia-container-toolkit_1.20.1_deb_amd64.tar.gz")],
-    )
-    url = f"https://github.com/NVIDIA/nvidia-container-toolkit/archive/refs/tags/v{new_version}.tar.gz"
-    new_sha = upstream.asset(url)  # no sums file: the upstream does not publish one
-    body = tmp_path / "body.md"
-    before = snapshot(repo, NVIDIA_FILES)
-
-    assert track.main(["apply", "nvidia-container-toolkit", "--summary", str(body)], root=repo) == 0
-
-    assert changed_lines(before, repo) == {
-        "include/nvidia-container-toolkit.yml": [('  nvidia-container-toolkit-version: "1.20.1"', f'  nvidia-container-toolkit-version: "{new_version}"')],
-        "elements/nvidia/nvidia-container-toolkit.bst": [(f"  ref: 1c5b0f17bd3f56f3d1faa0ddaba8fa0c606fc416aeaf0ee0953265a438fab647", f"  ref: {new_sha}")],
-    }
-    text = body.read_text()
-    assert "Upstream does not publish a checksum file" in text
-    assert f"https://github.com/NVIDIA/nvidia-container-toolkit/releases/tag/v{new_version}" in text
 
 
 def write_repo(repo: Path, files: dict[str, str]) -> None:

@@ -15,8 +15,6 @@ BuildStream source ref.
                         k0s-patch                                                                 elements/k0s/k0s-bin.bst
   nvidia-open-595       include/nvidia.yml nvidia-open-595-version   NVIDIA-Linux-x86_64 driver ref: in
                                                                      .run                         elements/nvidia/nvidia-open-595.bst
-  nvidia-container-     include/nvidia-container-toolkit.yml        nvidia-container-toolkit    ref: in
-  toolkit               nvidia-container-toolkit-version            source archive               elements/nvidia/nvidia-container-toolkit.bst
   oras                  Justfile oras_image tag                      setup-oras url + checksum in .github/workflows/*.yml
 
 The .bst pins cover every architecture the element fetches: the top-level
@@ -24,10 +22,8 @@ amd64 sources and the arm64 ones under `(?): arch == "aarch64"`. Every
 `url:` line carrying the component's marker is a pin, wherever it sits, so a
 bump refreshes all architectures at once, and a release counts as a candidate
 only when every architecture's asset and checksum file is attached. ORAS is
-CI tooling and pinned for amd64 runners only. NVIDIA Container Toolkit's
-source archive is GitHub's auto-generated tarball, which the upstream does
-not publish a sha256 for, so its pin is updated from the downloaded bytes
-alone (empty `sums:`) — review the diff carefully before merging.
+CI tooling and pinned for amd64 runners only. The NVIDIA Container Toolkit is
+not tracked: it is bumped by hand (docs/skills/nvidia-sysext.md).
 
 check   Newest release of each component inside its pinned MAJOR.MINOR series:
         Kubernetes from dl.k8s.io/release/stable-X.Y.txt, the NVIDIA driver
@@ -39,8 +35,7 @@ apply   Moves one component to a version (default: the newest in its series)
         and rewrites every pin derived from it. Each sha256 is read from the
         checksum file the project publishes next to the asset, then confirmed
         by downloading the asset and hashing it. Nothing is written unless
-        every pin verifies. Components with no upstream checksum file
-        (`nvidia-container-toolkit`) trust the sha256 of the downloaded bytes.
+        every pin verifies.
 
 Only patch releases are proposed automatically. A minor bump is a decision: the
 kubeadm payload follows the minor of the cluster it joins
@@ -564,17 +559,9 @@ COMPONENTS: dict[str, Component] = {
                      element="elements/nvidia/nvidia-open-595.bst", marker="%{nvidia-version}",
                      element_variables=("nvidia-version",),
                      version_re=r"(\d+\.\d+(?:\.\d+)?)", version_fmt="{0}"),
-        BstComponent("nvidia-container-toolkit", "NVIDIA/nvidia-container-toolkit", "",
-                     include="include/nvidia-container-toolkit.yml",
-                     variables=("nvidia-container-toolkit-version",),
-                     element="elements/nvidia/nvidia-container-toolkit.bst",
-                     marker="%{nvidia-container-toolkit-version}"),
         OrasComponent(),
     )
 }
-# GitHub's auto-generated source tarball is a single URL per release, not an
-# amd64/arm64 pair; the multi-arch mirror invariant does not apply.
-COMPONENTS["nvidia-container-toolkit"].multi_arch = False
 
 
 def _pins_at(component: Component, tree: Tree, version: str) -> list[Pin]:
@@ -669,20 +656,13 @@ def apply(root: Path, name: str, version: str | None = None) -> Result | None:
     hashed: dict[str, str] = {}
     changes = []
     for pin in component.pins(tree):
-        # An empty sums URL opts out of checksum-file cross-verification
-        # (used when the upstream does not publish a sha256 next to the
-        # asset, for example GitHub's auto-generated source tarballs): we
-        # compute the sha256 from the downloaded bytes and trust it.
-        if pin.sums:
-            if pin.sums not in sums:
-                sums[pin.sums] = _get(pin.sums).decode("utf-8", "replace")
-            sha = published_sha256(sums[pin.sums], pin.asset, pin.sums)
-            if pin.url not in hashed:
-                hashed[pin.url] = _download_sha256(pin.url)
-            if hashed[pin.url] != sha:
-                raise TrackError(f"{pin.url} hashes to {hashed[pin.url]}, but {pin.sums} says {sha}")
-        else:
-            sha = _download_sha256(pin.url)
+        if pin.sums not in sums:
+            sums[pin.sums] = _get(pin.sums).decode("utf-8", "replace")
+        sha = published_sha256(sums[pin.sums], pin.asset, pin.sums)
+        if pin.url not in hashed:
+            hashed[pin.url] = _download_sha256(pin.url)
+        if hashed[pin.url] != sha:
+            raise TrackError(f"{pin.url} hashes to {hashed[pin.url]}, but {pin.sums} says {sha}")
         changes.append(Change(pin, read_pin(tree, pin), sha))
         write_pin(tree, pin, sha)
     files = tree.save()
@@ -706,22 +686,13 @@ def summary(result: Result) -> str:
     for pin, before, after in result.changes:
         was = "unchanged" if before == after else f"was `{before}`"
         lines.append(f"| `{pin.path}` | [`{pin.asset}`]({pin.url}) | `{after}` ({was}) |")
-    sums_urls = [change.pin.sums for change in result.changes if change.pin.sums]
-    if sums_urls:
-        lines += [
-            "",
-            "Every sha256 comes from the checksum file upstream publishes next to the",
-            "asset, and matched the sha256 of the downloaded asset:",
-            "",
-            *[f"- {url}" for url in dict.fromkeys(sums_urls)],
-        ]
-    else:
-        lines += [
-            "",
-            "Upstream does not publish a checksum file next to the asset; the new",
-            "sha256 was computed from the downloaded bytes. Review the diff carefully",
-            "before merging.",
-        ]
+    lines += [
+        "",
+        "Every sha256 comes from the checksum file upstream publishes next to the",
+        "asset, and matched the sha256 of the downloaded asset:",
+        "",
+        *[f"- {url}" for url in dict.fromkeys(change.pin.sums for change in result.changes)],
+    ]
     if result.mentions:
         lines += ["", f"These lines of the changed files still mention `{old}`:", ""]
         lines += [f"- `{mention}`" for mention in result.mentions]
