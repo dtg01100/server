@@ -4,7 +4,7 @@ description: Use when building or debugging the Bluefin Server boot chain, the d
 metadata:
   type: reference
   status: stable
-  last_updated: "2026-09-29"
+  last_updated: "2026-09-30"
   context7-sources:
     - /systemd/systemd
     - /apache/buildstream
@@ -160,6 +160,17 @@ Secure Boot: the stick's systemd-boot and UKIs are signed with the project DB
 key. On bare metal put the firmware into Setup Mode and pick the enrollment
 entry in the systemd-boot menu (`secure-boot-enroll if-safe` only
 auto-enrolls in VMs), or turn Secure Boot off.
+
+sysinstall erases the chosen disk before it writes, so a failure leaves the
+target disk blank. The `systemd-sysinstall.service` drop-in on the installer
+medium runs sysinstall with `--reboot=no`, sets `SuccessAction=reboot` so a
+good install still reboots on its own, and sets `FailureAction=none` to override
+the upstream unit's `FailureAction=halt`. Console output is left unmute
+(`--mute-console=no`) so any error is on `/dev/console` and in the journal,
+which lives only in RAM on the live installer — the operator (or the
+captured serial log) reads it before the failed run powers off or reboots.
+See [issue #308](https://github.com/projectbluefin/server/issues/308) for
+the bare-metal failure mode that drove this.
 
 ### From a diskless node
 
