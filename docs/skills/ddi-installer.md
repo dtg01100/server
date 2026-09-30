@@ -139,17 +139,6 @@ installed disk is identical whichever path installed it. No shell installer.
 See [usb-installer.md](usb-installer.md) — the offline installer image, its
 boot flow, unattended installs, and install-time provisioning.
 
-sysinstall erases the chosen disk before it writes, so a failure leaves the
-target disk blank. The `systemd-sysinstall.service` drop-in on the installer
-medium runs sysinstall with `--reboot=no`, sets `SuccessAction=reboot` so a
-good install still reboots on its own, and sets `FailureAction=none` to override
-the upstream unit's `FailureAction=halt`. Console output is left unmute
-(`--mute-console=no`) so any error is on `/dev/console` and in the journal,
-which lives only in RAM on the live installer — the operator (or the
-captured serial log) reads it before the failed run powers off or reboots.
-See [issue #308](https://github.com/projectbluefin/server/issues/308) for
-the bare-metal failure mode that drove this.
-
 ### From a diskless node
 
 A running diskless node is also an installer. The OS DDI's ESP partition is
