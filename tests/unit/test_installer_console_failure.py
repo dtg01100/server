@@ -1,117 +1,60 @@
-"""Pin the installer drop-in so console failures stay readable.
+"""A failed console install leaves the machine up with its error readable.
 
-sysinstall erases the chosen disk before it writes, so a failure (for example
-on NVMe hardware, see projectbluefin/server#308) leaves the target disk
-blank. If the unit then halts on failure (upstream default
-``FailureAction=halt``) and mutes the console (``--mute-console=yes``), the
-operator sees nothing on screen and the journal lives only in RAM, which the
-installer then powers off.
+sysinstall erases the chosen disk before it writes, so a failed install leaves
+the target blank (projectbluefin/server#308). Upstream's
+systemd-sysinstall.service halts the machine when sysinstall fails
+(FailureAction=halt), and the installer's journal, which lives only in RAM,
+goes with it. Upstream also passes --mute-console=yes, which keeps kernel and
+service-manager messages, such as disk I/O errors, off the console while
+sysinstall runs; sysinstall's own output goes to the console either way.
 
-These tests pin the drop-in so:
-
-* ``--mute-console=yes`` is gone (the operator sees sysinstall's progress).
-* ``--reboot=yes`` is gone (sysinstall itself does not initiate a reboot;
-  the unit's ``SuccessAction=reboot`` does, separately from failures).
-* ``FailureAction`` is not a halt/poweroff (failures leave the console and
-  journal reachable).
+That a successful install still reboots on its own is pinned in
+test_usb_installer_prompts.py.
 """
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
+from _systemd import SystemdFile
+
 ROOT = Path(__file__).resolve().parents[2]
-DROP_IN = ROOT / "files" / "os" / "systemd" / "system" / "systemd-sysinstall.service.d" / "10-bluefin-installer.conf"
+DROPIN = (
+    ROOT
+    / "files"
+    / "os"
+    / "systemd"
+    / "system"
+    / "systemd-sysinstall.service.d"
+    / "10-bluefin-installer.conf"
+)
 
 
-def _sections(text: str) -> dict[str, dict[str, list[str]]]:
-    """Parse an INI-style drop-in keeping every value of repeated keys."""
-    sections: dict[str, dict[str, list[str]]] = {}
-    current: dict[str, list[str]] | None = None
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith(("#", ";")):
-            continue
-        if line.startswith("["):
-            current = sections.setdefault(line.strip("[]"), {})
-            continue
-        if current is None:
-            continue
-        key, _, value = line.partition("=")
-        current.setdefault(key, []).append(value)
-    return sections
+def test_a_failed_install_leaves_the_machine_up():
+    # Every other action ends what the operator is looking at: halt*, poweroff*
+    # and kexec* stop the machine, reboot* and soft-reboot* start the stick
+    # over, and exit* ends PID 1.
+    assert SystemdFile(DROPIN).value("Unit", "FailureAction") == "none"
 
 
-def test_drop_in_exists() -> None:
-    assert DROP_IN.is_file(), f"{DROP_IN} must exist"
+def test_kernel_and_service_manager_messages_reach_the_console():
+    [argv] = SystemdFile(DROPIN).commands()
+    assert argv[0] == "systemd-sysinstall"
+    assert not [word for word in argv if word.startswith("--mute-console")]
 
 
-def test_drop_in_does_not_mute_the_console() -> None:
-    u = _sections(DROP_IN.read_text(encoding="utf-8"))
-    exec_starts = u["Service"]["ExecStart"]
-    last = exec_starts[-1]
-    assert "--mute-console=yes" not in last, (
-        "the operator must see sysinstall's progress and any error on "
-        "/dev/console; --mute-console=yes hides them"
+def test_the_dropin_replaces_upstreams_command(tmp_path):
+    # Without the empty ExecStart= first, upstream's command would be kept too.
+    upstream = tmp_path / "systemd-sysinstall.service"
+    upstream.write_text(
+        "[Service]\nExecStart=systemd-sysinstall --mute-console=yes\n", encoding="utf-8"
     )
+    assert SystemdFile(upstream, DROPIN).commands() == SystemdFile(DROPIN).commands()
 
 
-def test_drop_in_does_not_pass_reboot_yes() -> None:
-    u = _sections(DROP_IN.read_text(encoding="utf-8"))
-    exec_starts = u["Service"]["ExecStart"]
-    last = exec_starts[-1]
-    assert "--reboot=yes" not in last, (
-        "SuccessAction=reboot handles the reboot on success; --reboot=yes "
-        "inside ExecStart makes sysinstall itself reboot, which would skip "
-        "the unit's failure path entirely"
-    )
-
-
-def test_drop_in_passes_reboot_no() -> None:
-    u = _sections(DROP_IN.read_text(encoding="utf-8"))
-    exec_starts = u["Service"]["ExecStart"]
-    last = exec_starts[-1]
-    assert "--reboot=no" in last, (
-        f"sysinstall must not trigger the reboot itself; got {last!r}"
-    )
-
-
-def test_drop_in_reboots_on_success() -> None:
-    u = _sections(DROP_IN.read_text(encoding="utf-8"))
-    assert u["Unit"].get("SuccessAction") == ["reboot"], (
-        "SuccessAction=reboot keeps the install-and-reboot flow on success"
-    )
-
-
-def test_drop_in_does_not_halt_on_failure() -> None:
-    u = _sections(DROP_IN.read_text(encoding="utf-8"))
-    failure_actions = u["Unit"].get("FailureAction", [])
-    assert failure_actions, (
-        "FailureAction must be set explicitly; the upstream default "
-        "FailureAction=halt hides install failures (see #308)"
-    )
-    forbidden = {"halt", "poweroff", "kexec"}
-    for action in failure_actions:
-        assert action not in forbidden, (
-            f"FailureAction={action} hides the failure on screen and in the "
-            "journal; the operator needs to see what went wrong on the bare "
-            "console (the live installer runs from RAM, so the journal must "
-            "stay reachable, not be powered off)"
-        )
-
-
-def test_drop_in_still_passes_kernel_and_definitions() -> None:
-    text = DROP_IN.read_text(encoding="utf-8")
-    assert "${BLUEFIN_INSTALL_KERNEL}" in text, "the disk UKI path must be threaded through"
-    assert "--definitions=/run/bluefin/installer/bluefin/repart.d" in text, (
-        "the installer's pinned repart.d must still be passed"
-    )
-
-
-def test_drop_in_resets_exec_start_before_redefining() -> None:
-    """The drop-in must clear the stock ExecStart= before setting its own;
-    without that both run and the install fails."""
-    u = _sections(DROP_IN.read_text(encoding="utf-8"))
-    exec_starts = u["Service"]["ExecStart"]
-    assert exec_starts[0] == "", f"first ExecStart must reset to empty, got {exec_starts[0]!r}"
-    assert len(exec_starts) == 2, f"expected ['', '...'], got {exec_starts}"
+def test_the_disk_uki_and_layout_still_come_from_the_stick():
+    [line] = SystemdFile(DROPIN).values("Service", "ExecStart")
+    words = shlex.split(line)
+    assert "--kernel=${BLUEFIN_INSTALL_KERNEL}" in words
+    assert "--definitions=/run/bluefin/installer/bluefin/repart.d" in words
