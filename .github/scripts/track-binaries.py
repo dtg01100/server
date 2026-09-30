@@ -5,32 +5,36 @@ A component is one upstream version plus every sha256 pin derived from it. The
 two move in one change: a new version with an old checksum is a broken
 BuildStream source ref.
 
-  component             version                                      sha256 pins
-  kubernetes            include/kubeadm.yml kubernetes-version       kubelet, kubeadm, kubectl  ref: in
-  cri-tools             include/kubeadm.yml crictl-version           crictl tarball             elements/kubeadm/
-  containerd            include/kubeadm.yml containerd-version       containerd static tarball  kubeadm-bin.bst
-  runc                  include/kubeadm.yml runc-version             runc.<arch>
-  cni-plugins           include/kubeadm.yml cni-plugins-version      CNI plugins tarball
-  k0s                   include/k0s.yml k0s-k8s-version and          k0s binary                 ref: in
-                        k0s-patch                                                                 elements/k0s/k0s-bin.bst
-  nvidia-open-595       include/nvidia.yml nvidia-open-595-version   NVIDIA-Linux-x86_64 driver ref: in
-                                                                     .run                         elements/nvidia/nvidia-open-595.bst
-  oras                  Justfile oras_image tag                      setup-oras url + checksum in .github/workflows/*.yml
+  component        version                                  sha256 pins
+  kubernetes       include/kubeadm.yml kubernetes-version   kubelet, kubeadm, kubectl  ref: in
+  cri-tools        include/kubeadm.yml crictl-version       crictl tarball             elements/kubeadm/
+  containerd       include/kubeadm.yml containerd-version   containerd static tarball  kubeadm-bin.bst
+  runc             include/kubeadm.yml runc-version         runc.<arch>
+  cni-plugins      include/kubeadm.yml cni-plugins-version  CNI plugins tarball
+  k0s              include/k0s.yml k0s-k8s-version and      k0s binary                 ref: in
+                   k0s-patch                                                           elements/k0s/k0s-bin.bst
+  nvidia-open-595  include/nvidia.yml                       NVIDIA-Linux-x86_64-       nvidia-open-595-sha256
+                   nvidia-open-595-version                  <version>.run              in include/nvidia.yml
+  oras             Justfile oras_image tag                  setup-oras url + checksum in .github/workflows/*.yml
 
 The .bst pins cover every architecture the element fetches: the top-level
 amd64 sources and the arm64 ones under `(?): arch == "aarch64"`. Every
 `url:` line carrying the component's marker is a pin, wherever it sits, so a
 bump refreshes all architectures at once, and a release counts as a candidate
 only when every architecture's asset and checksum file is attached. ORAS is
-CI tooling and pinned for amd64 runners only. The NVIDIA Container Toolkit is
-not tracked: it is bumped by hand (docs/skills/nvidia-sysext.md).
+CI tooling and pinned for amd64 runners only. An NVIDIA driver flavour is
+x86_64 only, and its sha256 is an atom next to its version, which the
+element's `ref:` reads. The NVIDIA Container Toolkit is not tracked: it is
+bumped by hand (docs/skills/nvidia-sysext.md).
 
 check   Newest release of each component inside its pinned MAJOR.MINOR series:
-        Kubernetes from dl.k8s.io/release/stable-X.Y.txt, the NVIDIA driver
-        from the Akamai NetStorage directory index at
-        download.nvidia.com/XFree86/Linux-x86_64/, the rest from the
-        project's GitHub releases. Drafts, prereleases and releases that lack
-        the pinned assets do not count.
+        Kubernetes from dl.k8s.io/release/stable-X.Y.txt, an NVIDIA driver
+        flavour from the directory index at
+        download.nvidia.com/XFree86/Linux-x86_64/ (its series is its driver
+        branch; a newer release counts once its .run and .run.sha256sum both
+        answer a HEAD request), the rest from the project's GitHub releases.
+        Drafts, prereleases and releases that lack the pinned assets do not
+        count.
 apply   Moves one component to a version (default: the newest in its series)
         and rewrites every pin derived from it. Each sha256 is read from the
         checksum file the project publishes next to the asset, then confirmed
@@ -39,9 +43,10 @@ apply   Moves one component to a version (default: the newest in its series)
 
 Only patch releases are proposed automatically. A minor bump is a decision: the
 kubeadm payload follows the minor of the cluster it joins
-(docs/skills/kubeadm-sysext.md); the NVIDIA driver follows its pinned branch
-(docs/skills/nvidia-sysext.md). Make it by hand with
-`apply COMPONENT --version X.Y.Z`, which runs the same verification.
+(docs/skills/kubeadm-sysext.md). Make it by hand with
+`apply COMPONENT --version X.Y.Z`, which runs the same verification. An NVIDIA
+flavour never leaves its driver branch; a new branch is a new flavour
+(docs/skills/nvidia-sysext.md).
 
 Why not Renovate: a regex manager needs the version and its digest in one
 match, but here the version lives in include/*.yml or the Justfile and the
@@ -71,7 +76,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -89,7 +94,11 @@ class TrackError(Exception):
     pass
 
 
-def _open(url: str):
+class NotFound(TrackError):
+    pass
+
+
+def _open(url: str, method: str = "GET"):
     headers = {"User-Agent": "projectbluefin-server-track-binaries"}
     if url.startswith("https://api.github.com/"):
         headers["Accept"] = "application/vnd.github+json"
@@ -99,16 +108,25 @@ def _open(url: str):
             # which must not see the token.
             headers["Authorization"] = f"Bearer {token}"
     try:
-        return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=TIMEOUT)
+        return urllib.request.urlopen(urllib.request.Request(url, headers=headers, method=method), timeout=TIMEOUT)
     except urllib.error.HTTPError as err:
-        raise TrackError(f"GET {url}: HTTP {err.code}") from None
+        raise (NotFound if err.code == 404 else TrackError)(f"{method} {url}: HTTP {err.code}") from None
     except urllib.error.URLError as err:
-        raise TrackError(f"GET {url}: {err.reason}") from None
+        raise TrackError(f"{method} {url}: {err.reason}") from None
 
 
 def _get(url: str) -> bytes:
     with _open(url) as response:
         return response.read()
+
+
+def _published(url: str) -> bool:
+    """Whether `url` is there, asked with HEAD. Only a 404 means no; other failures raise."""
+    try:
+        with _open(url, "HEAD"):
+            return True
+    except NotFound:
+        return False
 
 
 def _download_sha256(url: str) -> str:
@@ -165,11 +183,10 @@ class Pin:
     key: str
     url: str
     sums: str
-    # When True, `anchor` is unused: `read_pin`/`write_pin` look up `key:`
-    # directly, with no `url:` scope. Used when the sha256 lives in the
-    # include (a top-level atom like `nvidia-open-595-sha256:`) rather
-    # than on a source's `ref:` line.
-    standalone_key: bool = field(default=False)
+    # When True, `anchor` is unused: the sha256 is the one `key:` line in
+    # `path` (an include atom like `nvidia-open-595-sha256:`), not a
+    # source's `ref:`.
+    standalone_key: bool = False
 
     @property
     def asset(self) -> str:
@@ -192,10 +209,10 @@ def _key_in_mapping(lines: list[str], start: int, column: int, key: str) -> int 
 def _checksum_lines(lines: list[str], pin: Pin) -> list[int]:
     """Line numbers of `pin.key:` for every `url: pin.anchor` line; each must have one."""
     if pin.standalone_key:
-        for i, line in enumerate(lines):
-            if re.match(rf"^\s*{re.escape(pin.key)}:\s*\S+\s*$", line):
-                return [i]
-        raise TrackError(f"{pin.path}: no `{pin.key}:` line")
+        found = [i for i, line in enumerate(lines) if re.match(rf"^\s*{re.escape(pin.key)}:\s*\S+\s*$", line)]
+        if len(found) != 1:
+            raise TrackError(f"{pin.path}: expected exactly one `{pin.key}:` line, found {len(found)}")
+        return found
     found = []
     for i, line in enumerate(lines):
         match = URL_LINE_RE.match(line)
@@ -275,6 +292,8 @@ class Component:
     sums: str
     stable_channel = ""
     version_re = r"(\d+\.\d+\.\d+)"
+    # How to go past the pinned series, for the pull request body.
+    beyond_series = "a minor bump is a manual `.github/scripts/track-binaries.py apply {name} --version ...`."
 
     def current(self, tree: Tree) -> str:
         raise NotImplementedError
@@ -284,6 +303,9 @@ class Component:
 
     def pins(self, tree: Tree) -> list[Pin]:
         raise NotImplementedError
+
+    def series(self, version: str) -> str:
+        return _series(version)
 
     def candidates(self, tree: Tree, series: str) -> list[str]:
         """Releases in `series`: the stable channel's, or every GitHub release with its pinned assets."""
@@ -300,7 +322,7 @@ class Component:
             if release.get("draft") or release.get("prerelease") or not tag.startswith("v"):
                 continue
             version = tag[1:]
-            if not re.fullmatch(self.version_re, version) or _series(version) != series:
+            if not re.fullmatch(self.version_re, version) or self.series(version) != series:
                 continue
             # The pinned assets must be attached already: a release can be
             # published while its assets are still uploading.
@@ -383,83 +405,54 @@ class BstComponent(Component):
 
 
 class NvidiaDriverComponent(BstComponent):
-    """An NVIDIA driver flavour: version + sha256 in `include/nvidia.yml`,
-    one .run URL per `<flavour>.bst` element.
+    """One NVIDIA driver flavour, nvidia-open-<branch>, tracked inside its branch.
 
-    NVIDIA publishes drivers as versioned directories under
-    `https://download.nvidia.com/XFree86/Linux-x86_64/<version>/` with a
-    `<file>.sha256sum` next to each `.run`. The tracker scrapes the parent
-    directory's HTML index for `series.*` subdirectories, parses the version
-    numbers, and keeps the newest one that has its `.run` and `.sha256sum`
-    assets uploaded. GitHub Releases are not used.
+    The version and the .run's sha256 are the flavour's two atoms in
+    include/nvidia.yml; the element's `ref:` reads the sha256 atom. NVIDIA
+    publishes each release as a directory under INDEX holding
+    NVIDIA-Linux-x86_64-<version>.run and <file>.sha256sum. A newer release
+    of the branch counts once both answer a HEAD request: `check` never
+    downloads a .run, `apply` downloads and hashes the one it moves to.
     """
 
-    # NVIDIA ships a single x86_64 binary per release; arm64 has no driver
-    # image here, so the multi-arch mirror invariant does not apply.
+    INDEX = "https://download.nvidia.com/XFree86/Linux-x86_64/"
+    DIR_RE = re.compile(r"""href=["']([^"'/]+)/["']""")
     multi_arch = False
+    beyond_series = "a new driver branch is a new flavour (docs/skills/nvidia-sysext.md)."
 
-    # Directory listing anchor used by Akamai NetStorage; matches the link to
-    # a subdirectory (a trailing slash on the href) and captures the name.
-    DIR_RE = re.compile(r"href='([^']+/)'")
-    INDEX_URL = "https://download.nvidia.com/XFree86/Linux-x86_64/"
-    version_re = r"(\d+\.\d+(?:\.\d+)?)"
+    def __init__(self, flavour: str):
+        branch = flavour.removeprefix("nvidia-open-")
+        super().__init__(flavour, "", "{url}.sha256sum", include="include/nvidia.yml",
+                         variables=(f"{flavour}-version",), element=f"elements/nvidia/{flavour}.bst",
+                         marker="%{nvidia-version}", element_variables=("nvidia-version",),
+                         version_re=rf"({re.escape(branch)}\.\d+(?:\.\d+)?)")
+
+    def series(self, version):
+        return version.split(".", 1)[0]
 
     def pins(self, tree):
-        # The .run URL expands once nvidia-version (set in the element) is
-        # resolved; the sha256 lives in the include as the
-        # `<flavour>-sha256:` atom, not on the element's `ref:` line (the
-        # `ref:` references that atom so several flavours can share the
-        # same recipe). Write the new digest to the include atom directly.
-        pin = super().pins(tree)[0]
-        sha_key = f"{self.variables[0].removesuffix('-version')}-sha256"
-        return [Pin(self.include, "", sha_key, pin.url, pin.sums, standalone_key=True)]
+        pins = super().pins(tree)
+        if len(pins) != 1:
+            raise TrackError(f"{self.element}: expected one source url with {self.marker}, found {len(pins)}")
+        return [Pin(self.include, "", f"{self.name}-sha256", pins[0].url, pins[0].sums, standalone_key=True)]
 
-    def _list_versions(self) -> list[str]:
-        """Every version NVIDIA has a directory for, oldest first."""
-        text = _get(self.INDEX_URL).decode("utf-8", "replace")
-        # Trim to the <ul class='directorycontents'> block when present so
-        # unrelated anchor text outside the file list cannot match.
-        block = re.search(r"<ul class='directorycontents'>(.*?)</ul>", text, re.DOTALL)
-        body = block.group(1) if block else text
-        names = [m.group(1).rstrip("/") for m in self.DIR_RE.finditer(body)]
-        # Only accept directory names that parse as a version, and exclude
-        # non-driver branches (BSD/Quadro/etc.) which live in sibling indexes.
+    def candidates(self, tree, series):
+        current = self.current(tree)
+        index = _get(self.INDEX).decode("utf-8", "replace")
+        listed = {m[1] for m in self.DIR_RE.finditer(index) if re.fullmatch(self.version_re, m[1])}
+        if current not in listed:
+            raise TrackError(f"{self.INDEX} does not list the pinned {current}; did its format change?")
         found = []
-        for name in names:
-            if re.fullmatch(self.version_re, name):
-                found.append(name)
+        for version in sorted(listed, key=_numbers):
+            if _numbers(version) <= _numbers(current):
+                continue
+            (pin,) = _pins_at(self, tree, version)
+            if _published(pin.url) and _published(pin.sums):
+                found.append(version)
         return found
 
-    def candidates(self, tree: Tree, series: str) -> list[str]:
-        """Newest 595.x directory that has both the .run and .sha256sum uploaded."""
-        # The tracker passes `_series(current)`, which is `595.104` for a
-        # current pin of `595.104.02` (the major.minor prefix). We want every
-        # 595.*.*.* directory NVIDIA publishes, so strip the trailing
-        # `.NN` patch that `_series` preserves.
-        branch = series.split(".", 1)[0]
-        prefix = f"{branch}."
-        found = []
-        for version in self._list_versions():
-            if not version.startswith(prefix):
-                continue
-            run_url = f"https://download.nvidia.com/XFree86/Linux-x86_64/{version}/NVIDIA-Linux-x86_64-{version}.run"
-            sums_url = run_url + ".sha256sum"
-            # A directory exists without its assets yet (NVIDIA sometimes
-            # publishes the dir first); fetch both to verify the assets
-            # are uploaded before proposing a bump. The bytes are discarded
-            # here — the .run is re-downloaded later to verify the sha256.
-            # `_open` re-raises network errors as TrackError, so catch that
-            # (plus the raw urllib errors a custom transport could surface).
-            try:
-                for url in (run_url, sums_url):
-                    _get(url)
-            except TrackError:
-                continue
-            found.append(version)
-        return found
-
-    def notes(self, version: str) -> str:
-        return f"https://download.nvidia.com/XFree86/Linux-x86_64/{version}/"
+    def notes(self, version):
+        return f"{self.INDEX}{version}/"
 
 
 class OrasComponent(Component):
@@ -530,11 +523,7 @@ COMPONENTS: dict[str, Component] = {
                      include="include/k0s.yml", variables=("k0s-k8s-version", "k0s-patch"),
                      element="elements/k0s/k0s-bin.bst", marker="%{k0s-upstream-tag}",
                      version_re=r"(\d+\.\d+\.\d+)\+k0s\.(\d+)", version_fmt="{0}+k0s.{1}"),
-        NvidiaDriverComponent("nvidia-open-595", "NVIDIA/nvidia-open-gpu-modules", "{url}.sha256sum",
-                     include="include/nvidia.yml", variables=("nvidia-open-595-version",),
-                     element="elements/nvidia/nvidia-open-595.bst", marker="%{nvidia-version}",
-                     element_variables=("nvidia-version",),
-                     version_re=r"(\d+\.\d+(?:\.\d+)?)", version_fmt="{0}"),
+        NvidiaDriverComponent("nvidia-open-595"),
         OrasComponent(),
     )
 }
@@ -559,7 +548,7 @@ def _github_releases(repo: str) -> list[dict]:
 def newest(component: Component, tree: Tree) -> str:
     """Newest release in the pinned series, or the current version if none is newer."""
     current = component.current(tree)
-    return max([current, *component.candidates(tree, _series(current))], key=_numbers)
+    return max([current, *component.candidates(tree, component.series(current))], key=_numbers)
 
 
 def published_sha256(text: str, asset: str, url: str) -> str:
@@ -642,8 +631,9 @@ def apply(root: Path, name: str, version: str | None = None) -> Result | None:
 
 def summary(result: Result) -> str:
     component, old, new = result.component, result.old, result.new
-    if _series(old) == _series(new):
-        head = f"Patch release of **{component.name}** in the pinned `{_series(new)}` series: `{old}` → `{new}`."
+    series = component.series(new)
+    if component.series(old) == series:
+        head = f"Patch release of **{component.name}** in the pinned `{series}` series: `{old}` → `{new}`."
     else:
         head = f"Moves **{component.name}** from `{old}` to `{new}`, a series change."
     lines = [head, "", f"Release notes: {component.notes(new)}", "", "| File | Asset | sha256 |", "| --- | --- | --- |"]
@@ -662,8 +652,7 @@ def summary(result: Result) -> str:
         lines += [f"- `{mention}`" for mention in result.mentions]
     lines += [
         "",
-        "Only patch releases inside the pinned series are proposed; a minor bump is a",
-        f"manual `.github/scripts/track-binaries.py apply {component.name} --version ...`.",
+        f"Only patch releases inside the pinned series are proposed; {component.beyond_series.format(name=component.name)}",
         "The tracker regenerates this branch from `main`, so push fixes to a branch",
         "of your own.",
     ]
@@ -680,7 +669,7 @@ def check(root: Path) -> tuple[list[dict], list[str]]:
         except TrackError as err:
             errors.append(f"{name}: {err}")
             continue
-        rows.append({"component": name, "series": _series(current), "current": current, "latest": latest})
+        rows.append({"component": name, "series": component.series(current), "current": current, "latest": latest})
     return rows, errors
 
 
@@ -698,10 +687,11 @@ def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
     if args.command == "check":
         rows, errors = check(root)
         table = sys.stderr if args.json else sys.stdout
-        print(f"{'component':<12} {'series':<6} {'current':<14} {'latest':<14} state", file=table)
+        width = max(12, *map(len, COMPONENTS))
+        print(f"{'component':<{width}} {'series':<6} {'current':<14} {'latest':<14} state", file=table)
         for row in rows:
             state = "update" if row["latest"] != row["current"] else "current"
-            print(f"{row['component']:<12} {row['series']:<6} {row['current']:<14} {row['latest']:<14} {state}", file=table)
+            print(f"{row['component']:<{width}} {row['series']:<6} {row['current']:<14} {row['latest']:<14} {state}", file=table)
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         if args.json:
