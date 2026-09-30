@@ -285,9 +285,35 @@ class Component:
     def pins(self, tree: Tree) -> list[Pin]:
         raise NotImplementedError
 
-    def _candidates(self, tree: Tree, series: str) -> list[str]:
-        """Override for non-GitHub release sources."""
-        raise NotImplementedError
+    def candidates(self, tree: Tree, series: str) -> list[str]:
+        """Releases in `series`: the stable channel's, or every GitHub release with its pinned assets."""
+        if self.stable_channel:
+            url = self.stable_channel.format(series=series)
+            text = _get(url).decode().strip()
+            if not re.fullmatch(rf"v{re.escape(series)}\.\d+", text):
+                raise TrackError(f"{url} says `{text}`, not a {series}.x release")
+            return [text[1:]]
+        found = []
+        prefix = f"https://github.com/{self.repo}/releases/download/"
+        for release in _github_releases(self.repo):
+            tag = release.get("tag_name", "")
+            if release.get("draft") or release.get("prerelease") or not tag.startswith("v"):
+                continue
+            version = tag[1:]
+            if not re.fullmatch(self.version_re, version) or _series(version) != series:
+                continue
+            # The pinned assets must be attached already: a release can be
+            # published while its assets are still uploading.
+            names = {asset["name"] for asset in release.get("assets", [])}
+            wanted = {
+                urllib.parse.unquote(url.rsplit("/", 1)[1])
+                for pin in _pins_at(self, tree, version)
+                for url in (pin.url, pin.sums)
+                if url.startswith(prefix)
+            }
+            if wanted <= names:
+                found.append(version)
+        return found
 
     def parse(self, version: str) -> tuple[str, ...]:
         match = re.fullmatch(self.version_re, version)
@@ -355,35 +381,6 @@ class BstComponent(Component):
             raise TrackError(f"{self.element}: no source url contains {self.marker}")
         return pins
 
-    def _candidates(self, tree, series):
-        if self.stable_channel:
-            url = self.stable_channel.format(series=series)
-            text = _get(url).decode().strip()
-            if not re.fullmatch(rf"v{re.escape(series)}\.\d+", text):
-                raise TrackError(f"{url} says `{text}`, not a {series}.x release")
-            return [text[1:]]
-        found = []
-        prefix = f"https://github.com/{self.repo}/releases/download/"
-        for release in _github_releases(self.repo):
-            tag = release.get("tag_name", "")
-            if release.get("draft") or release.get("prerelease") or not tag.startswith("v"):
-                continue
-            version = tag[1:]
-            if not re.fullmatch(self.version_re, version) or _series(version) != series:
-                continue
-            # The pinned assets must be attached already: a release can be
-            # published while its assets are still uploading.
-            names = {asset["name"] for asset in release.get("assets", [])}
-            wanted = {
-                urllib.parse.unquote(url.rsplit("/", 1)[1])
-                for pin in _pins_at(self, tree, version)
-                for url in (pin.url, pin.sums)
-                if url.startswith(prefix)
-            }
-            if wanted <= names:
-                found.append(version)
-        return found
-
 
 class NvidiaDriverComponent(BstComponent):
     """An NVIDIA driver flavour: version + sha256 in `include/nvidia.yml`,
@@ -433,7 +430,7 @@ class NvidiaDriverComponent(BstComponent):
                 found.append(name)
         return found
 
-    def _candidates(self, tree: Tree, series: str) -> list[str]:
+    def candidates(self, tree: Tree, series: str) -> list[str]:
         """Newest 595.x directory that has both the .run and .sha256sum uploaded."""
         # The tracker passes `_series(current)`, which is `595.104` for a
         # current pin of `595.104.02` (the major.minor prefix). We want every
@@ -513,27 +510,6 @@ class OrasComponent(Component):
             for path, url in sorted({(path, m[0]) for path, m in urls})
         ]
 
-    def _candidates(self, tree, series):
-        prefix = f"https://github.com/{self.repo}/releases/download/"
-        found = []
-        for release in _github_releases(self.repo):
-            tag = release.get("tag_name", "")
-            if release.get("draft") or release.get("prerelease") or not tag.startswith("v"):
-                continue
-            version = tag[1:]
-            if not re.fullmatch(self.version_re, version) or _series(version) != series:
-                continue
-            names = {asset["name"] for asset in release.get("assets", [])}
-            wanted = {
-                urllib.parse.unquote(url.rsplit("/", 1)[1])
-                for pin in _pins_at(self, tree, version)
-                for url in (pin.url, pin.sums)
-                if url.startswith(prefix)
-            }
-            if wanted <= names:
-                found.append(version)
-        return found
-
 
 KUBEADM = dict(include="include/kubeadm.yml", element="elements/kubeadm/kubeadm-bin.bst")
 COMPONENTS: dict[str, Component] = {
@@ -580,22 +556,10 @@ def _github_releases(repo: str) -> list[dict]:
     raise TrackError(f"{repo}: more than {MAX_RELEASE_PAGES * 100} releases")
 
 
-def _candidates(component: Component, tree: Tree, series: str) -> list[str]:
-    """Discover the newest release in `series` the component's source supports.
-
-    Each Component subclass implements `_candidates`: the default
-    `BstComponent` / `OrasComponent` walk GitHub Releases (or a single
-    `stable_channel` URL); components whose upstream is not on GitHub
-    (for example `NvidiaDriverComponent`, which scrapes an Akamai
-    NetStorage directory listing) override it.
-    """
-    return component._candidates(tree, series)
-
-
 def newest(component: Component, tree: Tree) -> str:
     """Newest release in the pinned series, or the current version if none is newer."""
     current = component.current(tree)
-    return max([current, *_candidates(component, tree, _series(current))], key=_numbers)
+    return max([current, *component.candidates(tree, _series(current))], key=_numbers)
 
 
 def published_sha256(text: str, asset: str, url: str) -> str:
