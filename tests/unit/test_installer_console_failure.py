@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DROP_IN = ROOT / "files" / "os" / "systemd" / "system" / "systemd-sysinstall.service.d" / "bluefin-installer.conf"
+DROP_IN = ROOT / "files" / "os" / "systemd" / "system" / "systemd-sysinstall.service.d" / "10-bluefin-installer.conf"
 
 
 def _sections(text: str) -> dict[str, dict[str, list[str]]]:
