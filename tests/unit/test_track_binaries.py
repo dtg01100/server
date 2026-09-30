@@ -189,8 +189,9 @@ def repo(tmp_path):
     return tmp_path
 
 
-def snapshot(root: Path) -> dict[str, str]:
-    return {path: (root / path).read_text(encoding="utf-8") for path in FILES}
+def snapshot(root: Path, extra=()) -> dict[str, str]:
+    paths = list(FILES) + list(extra)
+    return {path: (root / path).read_text(encoding="utf-8") for path in paths}
 
 
 def changed_lines(before: dict[str, str], root: Path) -> dict[str, list[tuple[str, str]]]:
@@ -543,7 +544,7 @@ def test_no_op_run_leaves_multi_arch_files_byte_identical(repo, upstream, capsys
     assert capsys.readouterr().out == ""
 
 
-@pytest.mark.parametrize("name", [n for n, c in track.COMPONENTS.items() if isinstance(c, track.BstComponent)])
+@pytest.mark.parametrize("name", [n for n, c in track.COMPONENTS.items() if isinstance(c, track.BstComponent) and c.multi_arch])
 def test_real_elements_pin_amd64_and_arm64_alike(name):
     pins = track.COMPONENTS[name].pins(track.Tree(ROOT))
     by_arch = {arch: sorted(p.url.replace(arch, "ARCH") for p in pins if arch in p.url) for arch in ("amd64", "arm64")}
@@ -572,3 +573,151 @@ def test_every_pinned_source_belongs_to_exactly_one_component():
             if match:
                 owners = [c.name for c in track.COMPONENTS.values() if getattr(c, "marker", None) and c.marker in match["url"]]
                 assert len(owners) == 1, f"{element}: {match['url']} is tracked by {owners}"
+
+
+NVIDIA_INDEX = "https://download.nvidia.com/XFree86/Linux-x86_64/"
+NVIDIA_PIN = "e421c202e4c79f58c3c7f3161bbe71454ebb3d88936f88205a0e327cd04c59ca"
+NVIDIA_FILES = {
+    "include/aliases.yml": """aliases:
+  github: https://github.com/
+  nvidia_download: https://download.nvidia.com/
+""",
+    "include/nvidia.yml": f"""variables:
+  # nvidia-open-595: production branch 595
+  nvidia-open-595-version: "595.104.02"
+  nvidia-open-595-sha256: "{NVIDIA_PIN}"
+""",
+    "elements/nvidia/nvidia-open-595.bst": """kind: manual
+
+(@):
+- include/nvidia.yml
+
+sources:
+- kind: remote
+  url: nvidia_download:XFree86/Linux-x86_64/%{nvidia-version}/NVIDIA-Linux-x86_64-%{nvidia-version}.run
+  ref: "%{nvidia-open-595-sha256}"
+
+variables:
+  nvidia-version: "%{nvidia-open-595-version}"
+""",
+    "include/nvidia-container-toolkit.yml": """variables:
+  nvidia-container-toolkit-version: "1.20.1"
+""",
+    "elements/nvidia/nvidia-container-toolkit.bst": """kind: manual
+
+(@):
+- include/nvidia-container-toolkit.yml
+
+sources:
+- kind: tar
+  url: github:NVIDIA/nvidia-container-toolkit/archive/refs/tags/v%{nvidia-container-toolkit-version}.tar.gz
+  ref: 1c5b0f17bd3f56f3d1faa0ddaba8fa0c606fc416aeaf0ee0953265a438fab647
+""",
+}
+
+
+def nvidia_index(versions: list[str]) -> bytes:
+    """A trimmed Akamai NetStorage directory listing for the test fixtures."""
+    links = "\n".join(f"      <span class='dir'><a href='{v}/'>{v}/</a></span>" for v in versions)
+    return (
+        "<!doctype html><ul class='directorycontents'>"
+        f"<li><span class='dir'><a href='..'>..</a></span></li>\n{links}\n"
+        "</ul>"
+    ).encode()
+
+
+def test_nvidia_driver_scrapes_the_directory_index_and_stays_in_series(repo, upstream, tmp_path):
+    write_repo(repo, NVIDIA_FILES)
+    upstream.files[NVIDIA_INDEX] = nvidia_index(["595.45.04", "595.58.03", "595.71.05", "595.80", "595.91.07", "595.104.02"])
+    # 595.91.07 is missing its .sha256sum, so it cannot be proposed.
+    nvidia_assets(upstream, "595.104.02")
+    nvidia_assets(upstream, "595.71.05")
+
+    assert newest("nvidia-open-595", repo) == "595.104.02"
+    # Cross-series entries (e.g. a future 596.x.x release) are ignored.
+    upstream.files[NVIDIA_INDEX] = nvidia_index(["595.104.02", "596.85.03"])
+    nvidia_assets(upstream, "596.85.03")
+    assert newest("nvidia-open-595", repo) == "595.104.02"
+
+
+def test_nvidia_driver_bump_writes_the_include_sha256_atom(repo, upstream, tmp_path):
+    write_repo(repo, NVIDIA_FILES)
+    new = "595.105.00"
+    upstream.files[NVIDIA_INDEX] = nvidia_index(["595.104.02", new])
+    new_pin = nvidia_assets(upstream, new)
+    body = tmp_path / "body.md"
+    before = snapshot(repo, NVIDIA_FILES)
+
+    assert track.main(["apply", "nvidia-open-595", "--summary", str(body)], root=repo) == 0
+
+    assert changed_lines(before, repo) == {
+        "include/nvidia.yml": [
+            ('  nvidia-open-595-version: "595.104.02"', f'  nvidia-open-595-version: "{new}"'),
+            (f'  nvidia-open-595-sha256: "{NVIDIA_PIN}"', f'  nvidia-open-595-sha256: "{new_pin}"'),
+        ],
+    }
+    text = body.read_text()
+    # NVIDIA's "series" for the tracker is the MAJOR.MINOR prefix
+    # (`_series`); `595.104` -> `595.105` is a series change in that
+    # vocabulary. Within an NVIDIA branch that wording is misleading, but
+    # a branch bump is a maintainer decision (manual apply), not an
+    # automatic PR, so the tracker never proposes one.
+    assert f"Moves **nvidia-open-595** from `595.104.02` to `{new}`, a series change." in text
+    assert f"https://download.nvidia.com/XFree86/Linux-x86_64/{new}/" in text
+    assert f"- {NVIDIA_INDEX}{new}/NVIDIA-Linux-x86_64-{new}.run.sha256sum" in text
+
+
+def test_nvidia_driver_refuses_to_write_a_tampered_run(repo, upstream, tmp_path, capsys):
+    write_repo(repo, NVIDIA_FILES)
+    new = "595.105.00"
+    upstream.files[NVIDIA_INDEX] = nvidia_index(["595.104.02", new])
+    new_pin = nvidia_assets(upstream, new)
+    # Tamper with the run so the downloaded hash does not match the published sum.
+    upstream.files[f"{NVIDIA_INDEX}{new}/NVIDIA-Linux-x86_64-{new}.run"] = b"tampered"
+    before = snapshot(repo, NVIDIA_FILES)
+
+    assert track.main(["apply", "nvidia-open-595"], root=repo) == 1
+
+    assert snapshot(repo, NVIDIA_FILES) == before
+    assert f"{NVIDIA_INDEX}{new}/NVIDIA-Linux-x86_64-{new}.run hashes to" in capsys.readouterr().err
+
+
+def test_nvidia_container_toolkit_bumps_the_version_and_computes_the_sha(repo, upstream, tmp_path):
+    new_version = "1.20.2"
+    write_repo(repo, NVIDIA_FILES)
+    upstream.releases(
+        "NVIDIA/nvidia-container-toolkit",
+        [release(f"v{new_version}", f"nvidia-container-toolkit_{new_version}_deb_amd64.tar.gz")],
+        [release("v1.20.1", f"nvidia-container-toolkit_1.20.1_deb_amd64.tar.gz")],
+    )
+    url = f"https://github.com/NVIDIA/nvidia-container-toolkit/archive/refs/tags/v{new_version}.tar.gz"
+    new_sha = upstream.asset(url)  # no sums file: the upstream does not publish one
+    body = tmp_path / "body.md"
+    before = snapshot(repo, NVIDIA_FILES)
+
+    assert track.main(["apply", "nvidia-container-toolkit", "--summary", str(body)], root=repo) == 0
+
+    assert changed_lines(before, repo) == {
+        "include/nvidia-container-toolkit.yml": [('  nvidia-container-toolkit-version: "1.20.1"', f'  nvidia-container-toolkit-version: "{new_version}"')],
+        "elements/nvidia/nvidia-container-toolkit.bst": [(f"  ref: 1c5b0f17bd3f56f3d1faa0ddaba8fa0c606fc416aeaf0ee0953265a438fab647", f"  ref: {new_sha}")],
+    }
+    text = body.read_text()
+    assert "Upstream does not publish a checksum file" in text
+    assert f"https://github.com/NVIDIA/nvidia-container-toolkit/releases/tag/v{new_version}" in text
+
+
+def write_repo(repo: Path, files: dict[str, str]) -> None:
+    """Layer a small fixture on top of the base FILES set."""
+    for path, text in files.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8")
+
+
+def nvidia_assets(upstream: Upstream, version: str) -> str:
+    """Register the .run and .sha256sum under NVIDIA_INDEX/<version>/."""
+    run_url = f"{NVIDIA_INDEX}{version}/NVIDIA-Linux-x86_64-{version}.run"
+    sums_url = run_url + ".sha256sum"
+    data = f"payload of {run_url}".encode()
+    upstream.files[run_url] = data
+    upstream.files[sums_url] = f"{sha(data)}  NVIDIA-Linux-x86_64-{version}.run\n".encode()
+    return sha(data)
