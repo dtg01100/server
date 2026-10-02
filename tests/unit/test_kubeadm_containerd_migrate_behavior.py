@@ -205,9 +205,48 @@ def test_top_level_imports_when_config_has_no_section_header(tmp_path: Path) -> 
         "/usr/share/bluefin/containerd/conf.d/*.toml",
         "/etc/containerd/conf.d/*.toml",
     ]
+    # Both branches share one printf block, so the blame comment reads the
+    # same and carries no stray backslash from shell quoting.
+    migrated = config.read_text(encoding="utf-8")
+    assert "`imports` glob" in migrated
+    assert "\\" not in migrated
 
 
-def test_imports_with_a_trailing_comment_is_treated_as_present(tmp_path: Path) -> None:
+def test_multi_line_top_level_array_is_not_split_by_the_insertion(tmp_path: Path) -> None:
+    # A continuation line of a top-level multi-line array starts with `[`
+    # too. If the migrator treated it as a `[section]` header it would drop
+    # the imports block inside the array and containerd would refuse to
+    # start on that node.
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'version = 3\n'
+        'required_plugins = [\n'
+        '  ["io.containerd.grpc.v1.cri"],\n'
+        '  ["io.containerd.internal.v1.opt"],\n'
+        ']\n'
+        '\n'
+        '[grpc]\n'
+        '  address = "/run/containerd/containerd.sock"\n',
+        encoding="utf-8",
+    )
+
+    result = _run(config)
+
+    assert result.returncode == 0, result.stderr
+    migrated = config.read_text(encoding="utf-8")
+    parsed = tomllib.loads(migrated)
+    assert parsed["imports"] == [
+        "/usr/share/bluefin/containerd/conf.d/*.toml",
+        "/etc/containerd/conf.d/*.toml",
+    ]
+    assert parsed["required_plugins"] == [
+        ["io.containerd.grpc.v1.cri"],
+        ["io.containerd.internal.v1.opt"],
+    ]
+    # The block must land before the first real table header, not inside the
+    # array above it.
+    assert migrated.index(EXPECTED_IMPORTS) < migrated.index("[grpc]")
+    assert migrated.index("]\n") < migrated.index(EXPECTED_IMPORTS)
     # Some operators comment the import line they ship. The migrator must
     # not append a second `imports = [...]` and end up with two entries.
     config = tmp_path / "config.toml"
@@ -257,8 +296,9 @@ def test_mode_owner_and_inode_survive(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert config.stat().st_ino == before_inode
     assert (config.stat().st_mode & 0o777) == before_mode
-    # No `${CONF}.new` may be left behind on success.
-    assert not (tmp_path / f"{config.name}.new.1").exists()
+    # No `${CONF}.new*` may be left behind on success (the suffix is `$$`).
+    leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(f"{config.name}.new")]
+    assert leftovers == [], f"tmpfile leaked after success: {leftovers}"
 
 
 def test_tmpfile_is_cleaned_up_on_failure(tmp_path: Path) -> None:

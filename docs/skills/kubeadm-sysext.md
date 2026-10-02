@@ -100,15 +100,16 @@ but never newer. Patch releases change neither constraint.
 
 ## Migration
 
-The containerd config in `files/kubeadm/sysext/config.toml` declares an
-`imports` glob (`/usr/share/bluefin/containerd/conf.d/*.toml`,
-`/etc/containerd/conf.d/*.toml`) so drop-ins from other sysexts (the
-NVIDIA Container Toolkit's `nvidia` runtime handler,
+The containerd config in `files/kubeadm/sysext/config.toml` is seeded to
+`/etc/containerd/config.toml` by the tmpfiles `C` rule only when absent. A
+top-level `imports` glob (`/usr/share/bluefin/containerd/conf.d/*.toml`,
+`/etc/containerd/conf.d/*.toml`) in that config lets drop-ins from other
+sysexts (the NVIDIA Container Toolkit's `nvidia` runtime handler,
 [nvidia-sysext.md](nvidia-sysext.md)) and the node's own overrides deep-merge
 into the kubeadm containerd config (containerd resolves `imports` once, at
-config load). The tmpfiles `C` rule seeds `/etc/containerd/config.toml`
-from `/usr/share/bluefin/containerd/config.toml` only when absent, so an
-installed node from before `imports` existed keeps its old copy.
+config load). That glob is added to the shipped config by PR #350; because
+tmpfiles seeds only when the file is absent, an installed node keeps its old
+copy regardless, which is what this migration is for.
 
 `/usr/libexec/bluefin-kubeadm-containerd-migrate` (run from
 `containerd.service` ExecStartPre, after tmpfiles and before `modprobe
@@ -119,21 +120,24 @@ Top-level placement is load-bearing — containerd's TOML loader only
 consults a top-level `imports`; an `imports = [...]` appended at the end of
 a config that already closes inside a `[plugins.*]` table nests under that
 table as `[plugins.*].imports` and is silently ignored. The migrator finds
-the first `[section]` header in the config and inserts the imports block
-immediately before it (the same placement `files/kubeadm/sysext/config.toml`
-and PR #350 ship with); a config without any `[section]` table has the
-block appended, since there is nothing for it to land under. Diskless
-nodes reseed every boot from the source, which always carries `imports`;
-the migrator is a no-op there.
+the first `[section]` table header in the config — a line whose `[` (or
+`[[`) is followed by a key character and which ends in `]`, so a
+continuation line of a multi-line array is not mistaken for one — and
+inserts the imports block immediately before it (the same placement
+`files/kubeadm/sysext/config.toml` gets in PR #350); a config without any
+`[section]` table has the block appended, since there is nothing for it to
+land under. Diskless nodes reseed every boot from the source, so once #350
+has merged the migrator is a no-op there.
 
 The migration is shipped by the kubeadm sysext
 (`elements/oci/kubeadm-sysext.bst` installs it to `/usr/libexec/`) and
 takes effect on the next `containerd.service` start after the node
-updates to a kubeadm version that contains it. The
-`nvidia-container-toolkit-activate.service` `try-restart containerd.service`
-step ([nvidia-sysext.md](nvidia-sysext.md)) triggers it on the activate
-path so the `nvidia` runtime handler is visible to the GPU Operator on
-the same boot that activates the toolkit sysext.
+updates to a kubeadm version that contains it. Once PR #350 adds
+`nvidia-container-toolkit-activate.service`'s `try-restart
+containerd.service` step ([nvidia-sysext.md](nvidia-sysext.md)), the
+activate path will trigger it too, so the `nvidia` runtime handler becomes
+visible to the GPU Operator on the same boot that activates the toolkit
+sysext.
 
 ## Host tools
 

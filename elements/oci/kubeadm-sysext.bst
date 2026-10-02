@@ -5,12 +5,13 @@ description: |
   plugins from kubeadm/kubeadm-bin.bst, plus containerd.service,
   kubelet.service with kubeadm's 10-kubeadm.conf drop-in, the default
   containerd config, crictl config, module and sysctl drop-ins, and a
-  one-shot migration that appends the containerd `imports` glob to a
-  pre-existing /etc/containerd/config.toml so drop-ins (the NVIDIA
-  Container Toolkit sysext's `nvidia` runtime handler, node overrides in
-  /etc/containerd/conf.d) deep-merge into the kubeadm config on the next
-  containerd start. No preset enables anything; Ignition enables
-  containerd.service and kubelet.service per node.
+  one-shot migration that inserts the containerd `imports` glob at the top
+  level of a pre-existing /etc/containerd/config.toml (before its first
+  `[section]` table, where containerd's loader consults it) so drop-ins
+  (the NVIDIA Container Toolkit sysext's `nvidia` runtime handler, node
+  overrides in /etc/containerd/conf.d) deep-merge into the kubeadm config
+  on the next containerd start. No preset enables anything; Ignition
+  enables containerd.service and kubelet.service per node.
 
   Output: kubeadm_<image-version>.raw, .raw.zst and SHA256SUMS. Locked to
   one image version like the ZFS sysext (extension-release.kubeadm_<ver>,
