@@ -1,16 +1,17 @@
 ---
 name: kubeadm-sysext
-description: Build, ship and operate the opt-in kubeadm worker systemd-sysext (kubelet, kubeadm, containerd, runc, CNI plugins) and the base-kernel options it and Cilium need.
+description: Build, ship and operate the opt-in kubeadm systemd-sysext (kubelet, kubeadm, containerd, runc, CNI plugins) as a worker or a single-node control plane, and the base-kernel options it and Cilium need.
 metadata:
   type: how-to
   status: stable
   last_updated: "2026-10-02"
 ---
-# kubeadm worker sysext
+# kubeadm sysext
 
 ## When to Use
 
 - Joining a Bluefin Server node to an existing kubeadm cluster as a worker.
+- Running a single-node kubeadm control plane (`kubeadm-init.service`).
 - Bumping kubelet/kubeadm/kubectl, crictl, containerd, runc or CNI plugins.
 - Changing `containerd.service`, `kubelet.service`, the containerd config, or
   the kernel options Kubernetes networking needs.
@@ -37,7 +38,9 @@ Versions live in `include/kubeadm.yml`; every download is pinned by sha256 in
 | `/usr/bin/runc` | runc static build |
 | `/usr/libexec/cni/*` | containernetworking/plugins (whole tarball) |
 | `containerd.service`, `kubelet.service`, `kubelet.service.d/10-kubeadm.conf` | `files/kubeadm/sysext/` |
+| `/usr/libexec/bluefin-kubeadm-containerd-migrate` | `containerd.service` `ExecStartPre` ([Migration](#migration)) |
 | `/usr/share/bluefin/containerd/config.toml`, `/usr/share/bluefin/kubeadm/crictl.yaml` | defaults copied to `/etc` if absent |
+| `kubeadm-init.service`, `kubeadm-init-config.service`, `/usr/libexec/bluefin-kubeadm-init`, `/usr/share/bluefin/kubeadm/{init.yaml,init-tmpfiles.conf}` | opt-in control plane ([Single-node control plane](#single-node-control-plane)) |
 
 Nothing ships under `/opt`: `/opt/cni/bin` stays a writable host directory for
 the cluster CNI (Cilium's `cilium-cni`). containerd searches
@@ -72,9 +75,10 @@ but never newer. Patch releases change neither constraint.
 
 ## Runtime contract
 
-- No preset enables anything; `80-kubeadm.preset` disables both units against
-  FSDK's implicit default. Ignition enables the sysext, `containerd.service`
-  and `kubelet.service` per node, and runs `kubeadm join`.
+- No preset enables anything; `80-kubeadm.preset` disables `containerd.service`,
+  `kubelet.service` and `kubeadm-init.service` against FSDK's implicit default.
+  A worker's Ignition enables the sysext, `containerd.service` and
+  `kubelet.service`, and runs `kubeadm join`.
 - `systemd-sysext.service` is not ordered against tmpfiles, modules-load or
   sysctl, so `containerd.service` re-applies them in `ExecStartPre`:
   `systemd-tmpfiles --create kubeadm.conf` (seeds a writable
@@ -88,6 +92,15 @@ but never newer. Patch releases change neither constraint.
 - containerd root is `/var/lib/containerd` (`RequiresMountsFor=` orders it after
   a per-node mount), `SystemdCgroup = true`, sandbox `registry.k8s.io/pause:3.10.1`,
   registry `config_path = /etc/containerd/certs.d`.
+- The config `imports` two globs, `/usr/share/bluefin/containerd/conf.d/*.toml`
+  (drop-ins other sysexts ship: the NVIDIA Container Toolkit's `nvidia`
+  runtime handler, [nvidia-sysext.md](nvidia-sysext.md)) and
+  `/etc/containerd/conf.d/*.toml` (the node's own). containerd deep-merges
+  plugin sections, so a drop-in adds a runtime without restating the rest;
+  a glob that matches nothing imports nothing. `/etc/containerd/config.toml`
+  is seeded only when absent, so an installed node from before the imports
+  existed keeps its old copy; the [migration](#migration) adds the line on
+  its next containerd start. Diskless nodes reseed every boot.
 - kubelet restarts every 10 s until `kubeadm join` writes
   `/var/lib/kubelet/config.yaml` (standard kubeadm behaviour);
   `--volume-plugin-dir=/var/lib/kubelet/volumeplugins` because `/usr` is read-only.
@@ -100,55 +113,106 @@ but never newer. Patch releases change neither constraint.
 
 ## Migration
 
-The containerd config in `files/kubeadm/sysext/config.toml` is seeded to
-`/etc/containerd/config.toml` by the tmpfiles `C` rule only when absent. A
-top-level `imports` glob (`/usr/share/bluefin/containerd/conf.d/*.toml`,
-`/etc/containerd/conf.d/*.toml`) in that config lets drop-ins from other
-sysexts (the NVIDIA Container Toolkit's `nvidia` runtime handler,
-[nvidia-sysext.md](nvidia-sysext.md)) and the node's own overrides deep-merge
-into the kubeadm containerd config (containerd resolves `imports` once, at
-config load). That glob is added to the shipped config by PR #350; because
-tmpfiles seeds only when the file is absent, an installed node keeps its old
-copy regardless, which is what this migration is for.
+`/usr/libexec/bluefin-kubeadm-containerd-migrate` backfills the `imports`
+line into an `/etc/containerd/config.toml` seeded before the shipped config
+declared it. It runs on every `containerd.service` start, after the tmpfiles
+seed and before `modprobe overlay`, so containerd loads its result:
 
-`/usr/libexec/bluefin-kubeadm-containerd-migrate` (run from
-`containerd.service` ExecStartPre, after tmpfiles and before `modprobe
-overlay`) is an idempotent backfill: it prepends the `imports` line, with a
-comment blaming itself, at the very top of a config that lacks one, and
-leaves a config that already declares one alone (no mtime change, no
-DaemonSet / kured false trigger). Top-level placement is load-bearing —
-containerd's TOML loader only consults a top-level `imports`; an
-`imports = [...]` appended at the end of a config that already closes inside
-a `[plugins.*]` table nests under that table as `[plugins.*].imports` and is
-silently ignored. Line 1 is the only insertion point that is always valid
-TOML — a top-level key after any `[table]` header belongs to that table, and
-scanning for the first header cannot reliably distinguish a header from a
-continuation line of a multi-line top-level array (the last element of an
-array of arrays ends in `]` just like a header does). Diskless nodes reseed
-every boot from the source, so once #350 has merged the migrator is a no-op
-there.
+- A config with a line starting `imports =` is left alone: no write and no
+  mtime change, so DaemonSets and kured see nothing. Every config seeded from
+  the current default has one, so fresh installs and diskless boots (worker
+  or `kubeadm-init.service` control plane) are untouched. A missing file is
+  a no-op too.
+- Otherwise it prepends the shipped `imports` line, under a comment naming
+  the helper, at line 1. Top-level placement is load-bearing: containerd only
+  consults a top-level `imports`, and a key appended after a `[table]` header
+  (the old config ends inside `[plugins.'io.containerd.cri.v1.runtime'.cni]`)
+  belongs to that table and is silently ignored. Line 1 is the only insertion
+  point that is always valid TOML; scanning for the first header cannot tell
+  one from the last element of a multi-line top-level array of arrays.
+- It writes the new content to a sibling `config.toml.new.<pid>` and copies it
+  back over the original inode, so mode, owner and SELinux label survive. If
+  that copy fails (ENOSPC, read-only or immutable `/etc`), the sibling keeps
+  the complete migrated content and the log names it. The `ExecStartPre` is
+  `-`-prefixed, so containerd still starts with the old config.
 
-The helper never overwrites the config in place without a fallback: it builds
-the new content in a sibling `config.toml.new.<pid>` and copies it back over
-the original inode (mode, owner and SELinux label survive). If that copy
-fails (ENOSPC, read-only `/etc`), the complete new content is left in the
-sibling file and its path is logged, so a truncated config is recoverable.
-The ExecStartPre is `-`-prefixed: a node whose config.toml cannot be written
-(immutable, read-only) still starts containerd with its old config.
+An installed node picks it up on its first containerd start after updating
+to a kubeadm sysext that ships the helper. The NVIDIA Container Toolkit's
+activate unit restarts containerd after merging
+([nvidia-sysext.md](nvidia-sysext.md)), so the `nvidia` runtime handler
+reaches the GPU Operator on the boot that activates the toolkit sysext.
 
-The migration is shipped by the kubeadm sysext
-(`elements/oci/kubeadm-sysext.bst` installs it to `%{libexecdir}`) and
-takes effect on the next `containerd.service` start after the node
-updates to a kubeadm version that contains it. Once PR #350 adds
-`nvidia-container-toolkit-activate.service`'s `try-restart
-containerd.service` step ([nvidia-sysext.md](nvidia-sysext.md)), the
-activate path will trigger it too, so the `nvidia` runtime handler becomes
-visible to the GPU Operator on the same boot that activates the toolkit
-sysext.
+## Single-node control plane
+
+`kubeadm-init.service` turns the node into a one-node cluster that also runs
+workloads. Opt-in: nothing enables it, and a worker never sees its config.
+
+- **Enable it** by linking it into `multi-user.target.wants`. Its unit exists
+  only once `systemd-sysext.service` has merged the image, after PID 1
+  applied the boot's presets, so Ignition's `enabled: true` (a preset line)
+  does not reach it. Ignition writes `/etc/extensions/kubeadm_<ver>.raw`
+  (with a sha256 `verification`) and the link
+  `/etc/systemd/system/multi-user.target.wants/kubeadm-init.service ->
+  /usr/lib/systemd/system/kubeadm-init.service`; after the merge,
+  `bluefin-sysext-activate.service` starts it. On an installed node,
+  `systemctl enable kubeadm-init.service` once the sysext is merged.
+- **Config.** `kubeadm-init-config.service` (static, pulled in only by
+  `kubeadm-init.service`) applies `/usr/share/bluefin/kubeadm/init-tmpfiles.conf`
+  by absolute path: a tmpfiles `C` that copies the read-only default
+  `/usr/share/bluefin/kubeadm/init.yaml` to `/etc/kubernetes/bluefin/init.yaml`
+  only if absent. The rule is outside `tmpfiles.d`, so boot-time tmpfiles runs
+  never apply it. The default is kubeadm `v1beta4` `InitConfiguration` +
+  `ClusterConfiguration` + `KubeletConfiguration`: containerd's CRI socket,
+  `cgroupDriver: systemd`, cluster name `bluefin`, pods `10.244.0.0/16`,
+  services `10.96.0.0/12`, `imageRepository: registry.k8s.io`, and
+  `kubernetesVersion` set by the build from `include/kubeadm.yml`. The build
+  fails if the sysext's own `kubeadm config validate` rejects it. The advertise
+  address (default route's interface) and Node name (hostname) are left to
+  kubeadm. To override them or anything else, write the `/etc` copy (Ignition
+  or by hand) before the first init.
+- **Run.** After `containerd.service` (`Requires=`), `network-online.target`
+  and the seed, if `/etc/kubernetes/admin.conf` is absent and
+  `/etc/kubernetes/bluefin/init.yaml` exists, `/usr/libexec/bluefin-kubeadm-init`:
+  1. enables `containerd.service` and `kubelet.service`
+  2. runs `kubeadm init --config /etc/kubernetes/bluefin/init.yaml --skip-phases=addon/kube-proxy`
+     (Cilium replaces kube-proxy, and kubeadm records `proxy.disabled`)
+  3. links `/root/.kube/config` to `admin.conf`
+  4. removes the `node-role.kubernetes.io/control-plane:NoSchedule` taint
+
+  A failed `kubeadm init` runs `kubeadm reset --force` because a leftover
+  `admin.conf` would skip every retry. The unit then retries
+  (`Restart=on-failure`, 30 s).
+- **Idempotency.** An installed node keeps `admin.conf` and the enable
+  symlinks, so later boots skip the unit and start containerd and kubelet
+  directly. A diskless node loses `/etc` and `/var` on reboot and initialises
+  a fresh cluster on every boot.
+- **No CNI ships.** Until one is applied (Cilium with
+  `kubeProxyReplacement=true` and `k8sServiceHost` set to the node address),
+  the node stays NotReady and CoreDNS Pending.
+- **Images are pulled at init** (network required). Offline install will need
+  `kubeadm config images list --config /etc/kubernetes/bluefin/init.yaml`
+  (kube-apiserver, kube-controller-manager, kube-scheduler, coredns, pause,
+  etcd; kube-proxy is listed but not used), which is not solved yet.
+
+**Multi-node homelab.** With the homelab sysext and `HOMELAB_ROLE=control-plane`
+in `/etc/bluefin/homelab.conf`, `bluefin-cluster-prepare.service` runs between
+the seed and the init: it renames a `localhost` node to
+`bluefin-<machine-id[:8]>` and adds `controlPlaneEndpoint: <host>.local:6443`
+plus `apiServer.certSANs` to the `/etc` copy (unless it already sets an
+endpoint), so nodes reach the API by mDNS name. Nodes (`HOMELAB_ROLE=node`)
+join with a passphrase-authenticated bootstrap token; protocol, files and
+threat model: [`files/homelab/cluster/README.md`](../../files/homelab/cluster/README.md).
+`just dogfood-homelab-cluster` checks it in QEMU. The homelab Ignition
+templates set all of this up from one file
+([homelab-profile.md](homelab-profile.md)).
+
+`just dogfood-kubeadm` checks the whole path in QEMU: a diskless boot whose
+Ignition does only the above, then a test-only pinned Cilium. It needs `helm`
+on the host and internet access from the guest.
 
 ## Host tools
 
-kubeadm v1.34 preflight requires only `losetup`, `mount` and `cp` in `PATH`
+kubeadm v1.35 preflight requires only `losetup`, `mount` and `cp` in `PATH`
 (base image); `conntrack` stopped being required in v1.32. `iptables`,
 `ethtool`, `socat` and `conntrack` are not shipped: Cilium carries its own
 iptables, kube-proxy is replaced, and containerd 2 port-forwards in-process.
@@ -206,6 +270,8 @@ rebooted diskless client held locks. NFSv4 id mapping uses the kernel
 
 ## Verify
 
-`just export-image`, then boot diskless with `DOGFOOD_EXTRA_PROBE` activating
-`kubeadm_<ver>.raw` (copy to `/run/extensions`, `systemd-sysext refresh`) and
-check `crictl info`, `kubeadm init phase preflight`.
+`just export-image`, then `just dogfood-kubeadm` (single-node control plane:
+node Ready, CoreDNS Ready). For a worker, boot diskless with
+`DOGFOOD_EXTRA_PROBE` activating `kubeadm_<ver>.raw` (copy to
+`/run/extensions`, `systemd-sysext refresh`) and check `crictl info`,
+`kubeadm init phase preflight`.
