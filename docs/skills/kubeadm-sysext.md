@@ -112,11 +112,19 @@ installed node from before `imports` existed keeps its old copy.
 
 `/usr/libexec/bluefin-kubeadm-containerd-migrate` (run from
 `containerd.service` ExecStartPre, after tmpfiles and before `modprobe
-overlay`) is an idempotent backfill: it appends the `imports` line to a
-config that lacks it and leaves a config that already declares one alone
-(no mtime change, no DaemonSet / kured false trigger). Diskless nodes
-reseed every boot from the source, which always carries `imports`; the
-migrator is a no-op there.
+overlay`) is an idempotent backfill: it inserts the `imports` line at the
+top level of a config that lacks one and leaves a config that already
+declares one alone (no mtime change, no DaemonSet / kured false trigger).
+Top-level placement is load-bearing — containerd's TOML loader only
+consults a top-level `imports`; an `imports = [...]` appended at the end of
+a config that already closes inside a `[plugins.*]` table nests under that
+table as `[plugins.*].imports` and is silently ignored. The migrator finds
+the first `[section]` header in the config and inserts the imports block
+immediately before it (the same placement `files/kubeadm/sysext/config.toml`
+and PR #350 ship with); a config without any `[section]` table has the
+block appended, since there is nothing for it to land under. Diskless
+nodes reseed every boot from the source, which always carries `imports`;
+the migrator is a no-op there.
 
 The migration is shipped by the kubeadm sysext
 (`elements/oci/kubeadm-sysext.bst` installs it to `/usr/libexec/`) and

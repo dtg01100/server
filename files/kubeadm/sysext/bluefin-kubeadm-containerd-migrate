@@ -1,17 +1,20 @@
 #!/usr/bin/bash
 # bluefin-kubeadm-containerd-migrate — ensure /etc/containerd/config.toml has
-# an `imports` glob line, so drop-ins (the NVIDIA Container Toolkit sysext's
-# `nvidia` runtime handler, the node's own overrides in /etc/containerd/conf.d)
-# deep-merge into the kubeadm containerd config (files/kubeadm/sysext/config.toml).
+# a top-level `imports` glob line, so drop-ins (the NVIDIA Container Toolkit
+# sysext's `nvidia` runtime handler, the node's own overrides in
+# /etc/containerd/conf.d) deep-merge into the kubeadm containerd config
+# (files/kubeadm/sysext/config.toml).
 #
-# containerd resolves `imports` once, at config load. The kubeadm sysext seeds
-# /etc/containerd/config.toml from /usr/share/bluefin/containerd/config.toml
-# only when absent (tmpfiles.d `C`); an installed node from before the
-# `imports` line existed keeps its old copy until this migration runs. The
-# activate unit of the NVIDIA Container Toolkit sysext
-# (nvidia-container-toolkit-activate.service) restarts containerd after the
-# toolkit merges, so once containerd starts with the migrated config the
-# `nvidia` runtime handler is visible to the GPU Operator.
+# containerd resolves `imports` once, at config load, and only at the top
+# level — a TOML `imports = [...]` placed inside any `[plugins.*]` table is
+# not consulted. The kubeadm sysext seeds /etc/containerd/config.toml from
+# /usr/share/bluefin/containerd/config.toml only when absent (tmpfiles.d `C`);
+# an installed node from before the `imports` line existed keeps its old copy
+# until this migration runs. The activate unit of the NVIDIA Container
+# Toolkit sysext (nvidia-container-toolkit-activate.service) restarts
+# containerd after the toolkit merges, so once containerd starts with the
+# migrated config the `nvidia` runtime handler is visible to the GPU
+# Operator.
 #
 # Idempotent: a config that already declares `imports` is left alone, no mtime
 # change, no DaemonSet or kured false trigger. A node without
@@ -51,8 +54,33 @@ if grep -qE '^imports[[:space:]]*=' "${CONF}"; then
   exit 0
 fi
 
-# Append the same two globs the kubeadm config carries. Order matches the
-# source config so a diff against the seeded file stays minimal.
-log "appending imports to ${CONF}"
-printf '\n# Added by %s on containerd start: drop-ins (NVIDIA Container Toolkit\n# sysext'"'"'s `nvidia` runtime handler, node overrides in /etc/containerd/conf.d)\n# deep-merge into this config via containerd'"'"'s `imports` glob. See\n# docs/skills/kubeadm-sysext.md.\nimports = ["/usr/share/bluefin/containerd/conf.d/*.toml", "/etc/containerd/conf.d/*.toml"]\n' \
-  "${PROG}" >> "${CONF}"
+# Insert the same two globs the kubeadm config ships with (`config.toml` and
+# #350's diff put `imports = [...]` at top level before `[grpc]`). Insertion
+# point is the first `[section]` table header in the config; if the file has
+# none, append at the end. containerd's TOML loader only consults a top-level
+# `imports` — placing it inside `[plugins.'io.containerd.cri.v1.runtime'.cni]`
+# (where the seeded kubeadm config currently ends) nests it as
+# `[plugins.*].imports` and is silently ignored, which is why appending
+# `imports = [...]` was not enough.
+INSERT_LINE=$(grep -n -m1 -E '^[[:space:]]*\[[^]]+\]' "${CONF}" || true)
+if [ -n "${INSERT_LINE}" ]; then
+  insert_at=${INSERT_LINE%%:*}
+  log "inserting imports before line ${insert_at} of ${CONF}"
+  {
+    head -n "$((insert_at - 1))" "${CONF}"
+    printf '# Added by %s on containerd start: drop-ins (NVIDIA Container Toolkit\n' "${PROG}"
+    printf "# sysext's \`nvidia\` runtime handler, node overrides in /etc/containerd/conf.d)\n"
+    printf "# deep-merge into this config via containerd's \`imports\` glob. See\n"
+    printf "# docs/skills/kubeadm-sysext.md.\n"
+    printf 'imports = ["/usr/share/bluefin/containerd/conf.d/*.toml", "/etc/containerd/conf.d/*.toml"]\n'
+    printf '\n'
+    tail -n "+${insert_at}" "${CONF}"
+  } > "${CONF}.new"
+  mv "${CONF}.new" "${CONF}"
+else
+  # No table header, no top-level section yet. Append at the end and rely on
+  # containerd's tolerance for trailing content.
+  log "appending imports to ${CONF} (no section header found)"
+  printf '\n# Added by %s on containerd start: drop-ins (NVIDIA Container Toolkit\n# sysext'"'"'s `nvidia` runtime handler, node overrides in /etc/containerd/conf.d)\n# deep-merge into this config via containerd'"'"'s `imports` glob. See\n# docs/skills/kubeadm-sysext.md.\nimports = ["/usr/share/bluefin/containerd/conf.d/*.toml", "/etc/containerd/conf.d/*.toml"]\n' \
+    "${PROG}" >> "${CONF}"
+fi

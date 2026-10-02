@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -97,12 +98,48 @@ def test_appends_imports_to_a_pre_existing_config_without_them(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     migrated = config.read_text(encoding="utf-8")
-    # The original content is preserved; the migration only appends.
-    assert migrated.startswith(original)
+    # The original content is preserved as a contiguous block; the migration
+    # inserts the imports block immediately before the first `[section]`
+    # table header (`[grpc]`), so the file is the seed with the imports
+    # block prefixed in place of where `[grpc]` would otherwise be the first
+    # post-version content. containerd's TOML loader only consults a
+    # top-level `imports`, so a substring check is insufficient — verify
+    # the parsed structure carries the imports at the top level and nowhere
+    # else.
     assert EXPECTED_IMPORTS in migrated
     # Migrator stamps a blame line so on-disk diffs make it obvious where the
     # line came from without `git log` against /etc/containerd.
     assert "bluefin-kubeadm-containerd-migrate" in migrated
+    parsed = tomllib.loads(migrated)
+    assert parsed["imports"] == [
+        "/usr/share/bluefin/containerd/conf.d/*.toml",
+        "/etc/containerd/conf.d/*.toml",
+    ]
+    # Imports must not be nested under any [plugins.*] table — that placement
+    # is what containerd ignores. Walk every nested table (skipping the top
+    # level, which legitimately carries `imports`) and assert no `imports`
+    # key appears below it.
+    def _assert_no_nested_imports(table: object) -> None:
+        if isinstance(table, dict):
+            for value in table.values():
+                if isinstance(value, dict):
+                    assert "imports" not in value, (
+                        f"imports nested under a subtable is not consulted "
+                        f"by containerd: {value!r}"
+                    )
+                    _assert_no_nested_imports(value)
+    _assert_no_nested_imports(parsed)
+    # Sanity: the seeded content survives untouched (the migration must
+    # not lose any table the kubeadm sysext or operators configured).
+    assert 'address = "/run/containerd/containerd.sock"' in migrated
+    assert "registry.k8s.io/pause:3.10.1" in migrated
+    # The imports block lands before the first [section] table, so the
+    # blame comment precedes [grpc] in the file.
+    assert migrated.index("# Added by bluefin-kubeadm-containerd-migrate") < migrated.index("[grpc]")
+    # Sanity: the original file's content is still all there (none of the
+    # seeded lines are dropped or reordered).
+    for line in original.strip().splitlines():
+        assert line in migrated.splitlines()
 
 
 def test_idempotent_when_imports_already_present(tmp_path: Path) -> None:
@@ -149,6 +186,25 @@ def test_missing_config_is_a_no_op(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert not config.exists()
+
+
+def test_top_level_imports_when_config_has_no_section_header(tmp_path: Path) -> None:
+    # Some pre-imports kubeadm configs (operator hand-rolls) reach the
+    # migrator with only top-level scalars and no [section] table. The
+    # migrator must still land `imports` at top level so containerd sees it
+    # — appending is correct because there's no `[section]` for it to nest
+    # inside.
+    config = tmp_path / "config.toml"
+    config.write_text('version = 3\nroot = "/var/lib/containerd"\n', encoding="utf-8")
+
+    result = _run(config)
+
+    assert result.returncode == 0, result.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["imports"] == [
+        "/usr/share/bluefin/containerd/conf.d/*.toml",
+        "/etc/containerd/conf.d/*.toml",
+    ]
 
 
 def test_imports_with_a_trailing_comment_is_treated_as_present(tmp_path: Path) -> None:
