@@ -142,8 +142,11 @@ def test_prepends_imports_to_a_pre_existing_config_without_them(tmp_path: Path) 
 
 
 def test_idempotent_when_imports_already_present(tmp_path: Path) -> None:
+    # Top-level (ahead of every table header) is where containerd reads
+    # `imports`, so this config needs nothing: the migrator must not rewrite
+    # it.
     config = tmp_path / "config.toml"
-    config.write_text(_seeded_kubeadm_config() + "\n" + EXPECTED_IMPORTS + "\n", encoding="utf-8")
+    config.write_text(EXPECTED_IMPORTS + "\n\n" + _seeded_kubeadm_config(), encoding="utf-8")
     before_mtime = config.stat().st_mtime_ns
     before_inode = config.stat().st_ino
     expected = config.read_text(encoding="utf-8")
@@ -265,14 +268,20 @@ def test_multi_line_top_level_array_is_not_split_by_the_insertion(tmp_path: Path
     assert migrated.index(EXPECTED_IMPORTS) < migrated.index("[grpc]")
 
 
-def test_a_pre_existing_commented_imports_block_does_not_get_a_second_entry(
+def test_imports_written_after_a_table_header_is_nested_and_still_migrated(
     tmp_path: Path,
 ) -> None:
-    # Some operators comment the import line they ship. The migrator must
-    # not append a second `imports = [...]` and end up with two entries.
+    # An `imports = [...]` appended to the end of the seeded config lands
+    # inside the last table ([plugins."io.containerd.cri.v1.runtime".cni]),
+    # where containerd never consults it — exactly the broken shape #351 is
+    # about. The migrator must not read it as "already migrated": it has to
+    # add a real top-level `imports` (the nested key stays where the
+    # operator put it, and the result is valid TOML because the two keys
+    # live in different tables).
     config = tmp_path / "config.toml"
+    nested_line = 'imports = ["/etc/containerd/conf.d/*.toml"]'
     config.write_text(
-        _seeded_kubeadm_config() + '\n# custom drops\nimports = ["/etc/containerd/conf.d/*.toml"]\n',
+        _seeded_kubeadm_config() + "\n# custom drops\n" + nested_line + "\n",
         encoding="utf-8",
     )
 
@@ -280,8 +289,85 @@ def test_a_pre_existing_commented_imports_block_does_not_get_a_second_entry(
 
     assert result.returncode == 0, result.stderr
     migrated = config.read_text(encoding="utf-8")
-    imports_lines = re.findall(r"^imports\b[^\n]*", migrated, re.MULTILINE)
-    assert len(imports_lines) == 1, migrated
+    parsed = tomllib.loads(migrated)
+    assert parsed["imports"] == [
+        "/usr/share/bluefin/containerd/conf.d/*.toml",
+        "/etc/containerd/conf.d/*.toml",
+    ]
+    # The operator's nested line survives verbatim where they wrote it.
+    assert nested_line in migrated
+    assert parsed["plugins"]["io.containerd.cri.v1.runtime"]["cni"]["imports"] == [
+        "/etc/containerd/conf.d/*.toml",
+    ]
+
+
+def test_a_commented_out_imports_line_does_not_count_as_migrated(tmp_path: Path) -> None:
+    # A commented `# imports = [...]` is inert: containerd never sees it, so
+    # the migrator must still write a live top-level line, and exactly one.
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '# imports = ["/etc/containerd/conf.d/*.toml"]\n' + _seeded_kubeadm_config(),
+        encoding="utf-8",
+    )
+
+    result = _run(config)
+
+    assert result.returncode == 0, result.stderr
+    migrated = config.read_text(encoding="utf-8")
+    parsed = tomllib.loads(migrated)
+    assert parsed["imports"] == [
+        "/usr/share/bluefin/containerd/conf.d/*.toml",
+        "/etc/containerd/conf.d/*.toml",
+    ]
+    live_imports = [
+        line for line in migrated.splitlines()
+        if re.match(r"^[ \t]*imports[ \t]*=", line)
+    ]
+    assert len(live_imports) == 1, migrated
+
+
+@pytest.mark.parametrize("indent", ["  ", "\t"])
+def test_an_indented_top_level_imports_is_already_migrated(tmp_path: Path, indent: str) -> None:
+    # TOML ignores leading whitespace, so `  imports = [...]` ahead of any
+    # table header is a top-level key containerd honours. Prepending a
+    # second one would make the file unparseable ("Cannot overwrite a
+    # value") and crash-loop containerd, which the service's `-` prefix
+    # cannot prevent once the write succeeded.
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "version = 3\n" + indent + 'imports = ["/etc/containerd/conf.d/*.toml"]\n'
+        '\n[grpc]\n  address = "/run/containerd/containerd.sock"\n',
+        encoding="utf-8",
+    )
+    expected = config.read_text(encoding="utf-8")
+    before = config.stat()
+
+    result = _run(config)
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text(encoding="utf-8") == expected
+    assert (config.stat().st_mtime_ns, config.stat().st_ino) == (before.st_mtime_ns, before.st_ino)
+
+
+def test_content_that_does_not_parse_as_toml_is_never_installed(tmp_path: Path) -> None:
+    # Defence in depth: whatever shape the on-disk config has, the migrator
+    # must not write a file containerd cannot parse — a successful write of
+    # a broken config crash-loops containerd, and the `-` prefix on the
+    # ExecStartPre cannot undo that. Here the pre-existing config is already
+    # invalid TOML (a duplicated key), so the composed content is too.
+    config = tmp_path / "config.toml"
+    broken = 'version = 3\nversion = 4\n'
+    config.write_text(broken, encoding="utf-8")
+
+    result = _run(config)
+
+    assert result.returncode != 0
+    assert config.read_text(encoding="utf-8") == broken, "the live config is untouched"
+    assert "not valid TOML" in result.stderr
+    # The candidate is kept and named so an operator can inspect it.
+    leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(f"{config.name}.new")]
+    assert len(leftovers) == 1, leftovers
+    assert str(leftovers[0]) in result.stderr
 
 
 def test_unknown_argument_is_rejected(tmp_path: Path) -> None:
@@ -343,18 +429,3 @@ def test_failed_write_keeps_the_complete_migrated_content(tmp_path: Path) -> Non
     assert str(leftovers[0]) in result.stderr, "the kept file is named in the log"
     # The read-only config itself is untouched (the redirect never opened it).
     assert config.read_text(encoding="utf-8") == _seeded_kubeadm_config()
-
-
-def test_migrator_is_invoked_before_kubelet_modules_load(tmp_path: Path) -> None:
-    # The migration writes to /etc/containerd/config.toml, then containerd
-    # must load its config (which now imports the drops) before
-    # `modprobe br_netfilter` orders kubelet against network plumbing; this
-    # ordering is asserted in test_kubeadm_sysext.py, which uses the
-    # shipping unit text directly.
-    service = (REPO_ROOT / "files" / "kubeadm" / "sysext" / "containerd.service").read_text()
-    pre = [line.split("=", 1)[1] for line in service.splitlines() if line.startswith("ExecStartPre=")]
-    # `-`-prefixed: best effort, so a write failure cannot stop containerd.
-    assert "-/usr/libexec/bluefin-kubeadm-containerd-migrate" in pre
-    migrate = pre.index("-/usr/libexec/bluefin-kubeadm-containerd-migrate")
-    assert pre.index("/usr/bin/systemd-tmpfiles --create kubeadm.conf") < migrate
-    assert pre.index("/usr/bin/modprobe overlay") > migrate

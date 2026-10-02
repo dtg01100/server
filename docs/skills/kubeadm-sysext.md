@@ -118,11 +118,14 @@ line into an `/etc/containerd/config.toml` seeded before the shipped config
 declared it. It runs on every `containerd.service` start, after the tmpfiles
 seed and before `modprobe overlay`, so containerd loads its result:
 
-- A config with a line starting `imports =` is left alone: no write and no
-  mtime change, so DaemonSets and kured see nothing. Every config seeded from
-  the current default has one, so fresh installs and diskless boots (worker
-  or `kubeadm-init.service` control plane) are untouched. A missing file is
-  a no-op too.
+- A config that already declares a **top-level** `imports` key (anywhere
+  ahead of the first `[table]` header, leading whitespace allowed) is left
+  alone: no write and no mtime change, so DaemonSets and kured see nothing.
+  Every config seeded from the current default has one, so fresh installs and
+  diskless boots (worker or `kubeadm-init.service` control plane) are
+  untouched. A missing file is a no-op too. An `imports =` written *after* a
+  table header is nested in that table, which containerd ignores, so such a
+  node is still migrated.
 - Otherwise it prepends the shipped `imports` line, under a comment naming
   the helper, at line 1. Top-level placement is load-bearing: containerd only
   consults a top-level `imports`, and a key appended after a `[table]` header
@@ -130,11 +133,15 @@ seed and before `modprobe overlay`, so containerd loads its result:
   belongs to that table and is silently ignored. Line 1 is the only insertion
   point that is always valid TOML; scanning for the first header cannot tell
   one from the last element of a multi-line top-level array of arrays.
-- It writes the new content to a sibling `config.toml.new.<pid>` and copies it
-  back over the original inode, so mode, owner and SELinux label survive. If
-  that copy fails (ENOSPC, read-only or immutable `/etc`), the sibling keeps
-  the complete migrated content and the log names it. The `ExecStartPre` is
-  `-`-prefixed, so containerd still starts with the old config.
+- It writes the new content to a sibling `config.toml.new.<pid>`, checks it
+  parses as TOML (`python3`'s `tomllib`, else `containerd config dump`) and
+  only then copies it back over the original inode, so mode, owner and
+  SELinux label survive. Installing content containerd cannot parse would
+  crash-loop it, and the `-` prefix cannot undo a write that succeeded. If
+  validation or that copy fails (ENOSPC, read-only or immutable `/etc`), the
+  sibling keeps the complete migrated content and the log names it. The
+  `ExecStartPre` is `-`-prefixed, so containerd still starts with the old
+  config.
 
 An installed node picks it up on its first containerd start after updating
 to a kubeadm sysext that ships the helper. The NVIDIA Container Toolkit's
