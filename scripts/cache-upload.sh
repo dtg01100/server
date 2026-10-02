@@ -103,23 +103,22 @@ fi
 auth=""
 if [[ "${push_url}" == https://* ]]; then
     auth="
-          auth:
-            client-key: /src/${dir}/client.key
-            client-cert: /src/${dir}/client.crt"
+    auth:
+      client-key: /src/${dir}/client.key
+      client-cert: /src/${dir}/client.crt"
 fi
 
-# Only this project's `default` project pushes from here: the allow-list is
+# Only this project's artifacts server pushes from here: the allow-list is
 # local-element-only and the FSDK push needs to be coordinated with the
-# upstream FSDK project (out of #299 follow-up).
+# upstream FSDK project (out of #299 follow-up). `artifacts:` here is the
+# same top-level list BuildStream reads in project.conf (a list of remote
+# servers, each marked push: true).
 {
-    echo "projects:"
     cat <<EOF
-  default:
-    artifacts:
-      servers:
-        - url: ${push_url}
-          push: true
-          ${connection_config}${auth}
+artifacts:
+  - url: ${push_url}
+    push: true
+    ${connection_config}${auth}
 EOF
 } > "${dir}/push.conf"
 

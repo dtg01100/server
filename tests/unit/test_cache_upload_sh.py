@@ -82,8 +82,11 @@ def test_allowlist_is_run_against_the_real_graph(tmp_path: Path) -> None:
     # catch that and exit 0 with a warning, not upload blindly.
     assert result.returncode == 0, result.stderr
     assert "skipping cache upload" in result.stdout or "nothing" in result.stdout or "warning" in result.stdout.lower()
-    assert "bst push" not in result.stdout
-    assert "bst push" not in result.stderr
+    # The script must never invoke ``bst push`` -- that command would upload
+    # every cached artifact, including any signing key the build touched.
+    # ``bst artifact push`` is the legitimate, allow-list-scoped call.
+    assert "bst push " not in result.stdout
+    assert "bst push " not in result.stderr
 
 
 def test_secret_files_are_written_with_strict_permissions(tmp_path: Path) -> None:

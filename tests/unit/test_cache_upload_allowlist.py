@@ -139,6 +139,19 @@ def test_cli_refuses_an_unknown_local_element() -> None:
     assert "not a known local element" in result.stderr
 
 
+def test_cli_refuses_an_allowed_element_that_no_longer_exists() -> None:
+    """An entry on ``ALLOWED_ELEMENTS`` that has been renamed or removed
+    from the graph must surface as a violation, not slip into
+    ``bst artifact push`` and fail in an obscure way downstream. This
+    pins the fail-closed behaviour for ``main``-side drift between the
+    explicit list and the current element graph."""
+    result = subprocess.run(
+        [str(SCRIPT), "ignition/missing-from-graph.bst"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode != 0
+    assert "not a known local element" in result.stderr
+
+
 def test_cli_check_exits_zero_for_key_free() -> None:
     result = subprocess.run([str(SCRIPT), "--check", "ignition/ignition.bst"], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr

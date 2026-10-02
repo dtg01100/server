@@ -209,7 +209,13 @@ def main(argv: list[str] | None = None) -> int:
     safe: list[str] = []
     for elem in requested:
         local = resolve(elem, elements)
-        if local not in elements and elem not in ALLOWED_ELEMENTS:
+        # Fail-closed: an element that is not in the current graph must not
+        # be uploaded, even if it is on the explicit ALLOWED_ELEMENTS list.
+        # The list is an upper bound on what *could* be safe today; the
+        # graph is what *is* safe today. A future element that has been
+        # renamed or removed must surface here, not silently fall into
+        # ``bst artifact push`` and fail in a more obscure place.
+        if local not in elements:
             print(f"refusing: {elem} is not a known local element", file=sys.stderr)
             violations.append(elem)
             continue

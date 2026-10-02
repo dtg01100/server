@@ -345,7 +345,7 @@ jobs:
 
       - name: Upload update test image sets
         if: needs.changes.outputs.release != 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7f1c64a875d1fc6a0a # v7.0.1
         with:
           name: image-update
           path: |
@@ -355,38 +355,22 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Project #299 follow-up: push the key-free BuildStream elements this
-  # build produced to cache.projectbluefin.io:11002 so the next main run
-  # starts warm. The push remote only exists while `scripts/cache-upload.sh`
-  # runs (never during `bst build`); the explicit element list and the
-  # fails-closed allow-list script ensure no signing key is uploaded; the
-  # `bst-cache` environment (deployment branch policy on main) gates the
-  # credentials to direct pushes on `main` only. Missing credentials
-  # produce a clean skip; a failed upload must never fail a release.
-  # Lives in its own job so `environment:` is valid (steps cannot have one),
-  # so the credentials are scoped to this one job, and so a release's gating
-  # policy on `main` does not skip a PR's build.
-  upload-cache:
-    needs: [changes, build]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.result == 'success' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    environment:
-      name: bst-cache
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          # Upload happens after build, so the build's CASD_CLIENT_CERT may be
-          # required too (the same env var is fine in both jobs).
-      - name: Set up just
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
-        with:
-          tool: just@1.58.0
+      # Project #299 follow-up: push the key-free BuildStream elements this
+      # build produced to cache.projectbluefin.io:11002 so the next main run
+      # starts warm. Lives at the tail of `build` (not a separate job) so
+      # the BuildStream cache the kernel build wrote into ~/.cache/buildstream
+      # is the cache this step uploads -- a separate runner would have a
+      # fresh, empty cache. The push remote is generated for the duration of
+      # `scripts/cache-upload.sh` and only ever passed to `bst artifact
+      # push --deps none`; the `bst push` step never runs while `bst build`
+      # does. The explicit element list and the fails-closed allow-list
+      # script ensure no signing key is uploaded. Credentials gate on
+      # `release == 'true'`, which is only set on direct pushes to `main`
+      # (see the `changes` job); missing credentials exit 0 with a notice,
+      # and `continue-on-error: true` keeps a network blip from rolling
+      # back a release.
       - name: Upload key-free BuildStream artifacts to the org CAS
+        if: needs.changes.outputs.release == 'true'
         continue-on-error: true
         env:
           CASD_CLIENT_CERT: ${{ vars.CASD_CLIENT_CERT }}
