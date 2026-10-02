@@ -1,0 +1,58 @@
+#!/usr/bin/bash
+# bluefin-kubeadm-containerd-migrate — ensure /etc/containerd/config.toml has
+# an `imports` glob line, so drop-ins (the NVIDIA Container Toolkit sysext's
+# `nvidia` runtime handler, the node's own overrides in /etc/containerd/conf.d)
+# deep-merge into the kubeadm containerd config (files/kubeadm/sysext/config.toml).
+#
+# containerd resolves `imports` once, at config load. The kubeadm sysext seeds
+# /etc/containerd/config.toml from /usr/share/bluefin/containerd/config.toml
+# only when absent (tmpfiles.d `C`); an installed node from before the
+# `imports` line existed keeps its old copy until this migration runs. The
+# activate unit of the NVIDIA Container Toolkit sysext
+# (nvidia-container-toolkit-activate.service) restarts containerd after the
+# toolkit merges, so once containerd starts with the migrated config the
+# `nvidia` runtime handler is visible to the GPU Operator.
+#
+# Idempotent: a config that already declares `imports` is left alone, no mtime
+# change, no DaemonSet or kured false trigger. A node without
+# /etc/containerd/config.toml yet (tmpfiles seeds it on the same service start)
+# is also a no-op.
+#
+# Usage: bluefin-kubeadm-containerd-migrate [--config=PATH]
+#   --config=PATH  override the config file (default /etc/containerd/config.toml);
+#                  tests use a temp file.
+#
+# Wired into files/kubeadm/sysext/containerd.service ExecStartPre.
+
+set -euo pipefail
+shopt -s inherit_errexit
+export LC_ALL=C
+
+PROG="${0##*/}"
+CONF=/etc/containerd/config.toml
+
+for arg in "$@"; do
+  case "${arg}" in
+    --config=*) CONF="${arg#--config=}" ;;
+    *) printf '%s: unknown argument: %s\n' "${PROG}" "${arg}" >&2; exit 2 ;;
+  esac
+done
+
+log() { printf '%s: %s\n' "${PROG}" "$*" >&2; }
+
+# Missing file: tmpfiles has not seeded it, or the kubeadm sysext is not
+# installed. Either way, nothing to migrate; containerd.service's tmpfiles
+# ExecStartPre will (re)seed before containerd starts.
+[ -f "${CONF}" ] || exit 0
+
+# Already declares imports at the top of a line: leave the file untouched so
+# users, DaemonSets and kured see no change.
+if grep -qE '^imports[[:space:]]*=' "${CONF}"; then
+  exit 0
+fi
+
+# Append the same two globs the kubeadm config carries. Order matches the
+# source config so a diff against the seeded file stays minimal.
+log "appending imports to ${CONF}"
+printf '\n# Added by %s on containerd start: drop-ins (NVIDIA Container Toolkit\n# sysext'"'"'s `nvidia` runtime handler, node overrides in /etc/containerd/conf.d)\n# deep-merge into this config via containerd'"'"'s `imports` glob. See\n# docs/skills/kubeadm-sysext.md.\nimports = ["/usr/share/bluefin/containerd/conf.d/*.toml", "/etc/containerd/conf.d/*.toml"]\n' \
+  "${PROG}" >> "${CONF}"

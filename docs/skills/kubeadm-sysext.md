@@ -4,7 +4,7 @@ description: Build, ship and operate the opt-in kubeadm worker systemd-sysext (k
 metadata:
   type: how-to
   status: stable
-  last_updated: "2026-09-29"
+  last_updated: "2026-10-02"
 ---
 # kubeadm worker sysext
 
@@ -79,6 +79,9 @@ but never newer. Patch releases change neither constraint.
   sysctl, so `containerd.service` re-applies them in `ExecStartPre`:
   `systemd-tmpfiles --create kubeadm.conf` (seeds a writable
   `/etc/containerd/config.toml` and `/etc/crictl.yaml` only when absent),
+  `/usr/libexec/bluefin-kubeadm-containerd-migrate` (backfills the
+  `imports` glob on a config that pre-dates drop-in glob support, see
+  [Migration](#migration)),
   `modprobe overlay br_netfilter`, then `systemd-sysctl 90-kubeadm.conf`
   (`ip_forward`, `bridge-nf-call-ip{,6}tables`). kubeadm needs containerd
   running, so these hold before any preflight.
@@ -94,6 +97,35 @@ but never newer. Patch releases change neither constraint.
   and the boot-deadline rollback reboot stand down and reboots belong to kured
   (the deadline flags `/run/reboot-required`); see "Updates" in
   [ddi-installer.md](ddi-installer.md).
+
+## Migration
+
+The containerd config in `files/kubeadm/sysext/config.toml` declares an
+`imports` glob (`/usr/share/bluefin/containerd/conf.d/*.toml`,
+`/etc/containerd/conf.d/*.toml`) so drop-ins from other sysexts (the
+NVIDIA Container Toolkit's `nvidia` runtime handler,
+[nvidia-sysext.md](nvidia-sysext.md)) and the node's own overrides deep-merge
+into the kubeadm containerd config (containerd resolves `imports` once, at
+config load). The tmpfiles `C` rule seeds `/etc/containerd/config.toml`
+from `/usr/share/bluefin/containerd/config.toml` only when absent, so an
+installed node from before `imports` existed keeps its old copy.
+
+`/usr/libexec/bluefin-kubeadm-containerd-migrate` (run from
+`containerd.service` ExecStartPre, after tmpfiles and before `modprobe
+overlay`) is an idempotent backfill: it appends the `imports` line to a
+config that lacks it and leaves a config that already declares one alone
+(no mtime change, no DaemonSet / kured false trigger). Diskless nodes
+reseed every boot from the source, which always carries `imports`; the
+migrator is a no-op there.
+
+The migration is shipped by the kubeadm sysext
+(`elements/oci/kubeadm-sysext.bst` installs it to `/usr/libexec/`) and
+takes effect on the next `containerd.service` start after the node
+updates to a kubeadm version that contains it. The
+`nvidia-container-toolkit-activate.service` `try-restart containerd.service`
+step ([nvidia-sysext.md](nvidia-sysext.md)) triggers it on the activate
+path so the `nvidia` runtime handler is visible to the GPU Operator on
+the same boot that activates the toolkit sysext.
 
 ## Host tools
 

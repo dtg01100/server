@@ -3,10 +3,14 @@ description: |
   Opt-in systemd-sysext that turns a Bluefin Server node into a kubeadm
   worker: kubelet, kubeadm, kubectl, crictl, containerd, runc and the CNI
   plugins from kubeadm/kubeadm-bin.bst, plus containerd.service,
-  kubelet.service with kubeadm's 10-kubeadm.conf drop-in, and the default
-  containerd config, crictl config, module and sysctl drop-ins. No preset
-  enables anything; Ignition enables containerd.service and kubelet.service
-  per node.
+  kubelet.service with kubeadm's 10-kubeadm.conf drop-in, the default
+  containerd config, crictl config, module and sysctl drop-ins, and a
+  one-shot migration that appends the containerd `imports` glob to a
+  pre-existing /etc/containerd/config.toml so drop-ins (the NVIDIA
+  Container Toolkit sysext's `nvidia` runtime handler, node overrides in
+  /etc/containerd/conf.d) deep-merge into the kubeadm config on the next
+  containerd start. No preset enables anything; Ignition enables
+  containerd.service and kubelet.service per node.
 
   Output: kubeadm_<image-version>.raw, .raw.zst and SHA256SUMS. Locked to
   one image version like the ZFS sysext (extension-release.kubeadm_<ver>,
@@ -59,6 +63,8 @@ config:
     install -D -m 0644 "${src}/sysctl-90-kubeadm.conf" "${lib}/sysctl.d/90-kubeadm.conf"
     install -D -m 0644 "${src}/config.toml" "sysext%{datadir}/bluefin/containerd/config.toml"
     install -D -m 0644 "${src}/crictl.yaml" "sysext%{datadir}/bluefin/kubeadm/crictl.yaml"
+    install -D -m 0755 "${src}/bluefin-kubeadm-containerd-migrate" \
+      "sysext%{prefix}/libexec/bluefin-kubeadm-containerd-migrate"
 
     case "$(cat "sysext%{datadir}/bluefin/containerd/config.toml")" in
       *'sandbox = "%{pause-image}"'*) ;;
