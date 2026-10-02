@@ -286,17 +286,21 @@ version) and the NVIDIA Container Toolkit (Go); the driver sysext adds about
   `k0s/k0s-bin.bst`, `kubeadm/kubeadm-bin.bst`,
   `oci/{k0s,kubeadm,kubestellar,nvidia-container-toolkit}-sysext.bst`,
   `zfs/openzfs.bst`, and the unsigned NVIDIA binaries) goes through
-  `scripts/cache-upload.sh` after `just export-image`, on direct pushes to
-  `refs/heads/main` only. The push remote is generated for the duration of
-  the script and only ever passed to `bst artifact push --deps none`; the
-  `bst push` step never runs while `bst build` does. The element list
+  `scripts/cache-upload.sh` from the `upload-cache` job, on direct pushes
+  to `refs/heads/main` only. The upload runs in its own job after `build`
+  succeeds so the `bst-cache` environment can scope its secrets to that
+  job (a step cannot own an environment), and so a failed upload never
+  re-runs the image build. The push remote is generated for the duration
+  of the script and only ever passed to `bst artifact push --deps none`;
+  the `bst push` step never runs while `bst build` does. The element list
   comes from `.github/scripts/cache-upload-allowlist.py`, which fails closed
   if any of those elements is key-derived. The mTLS credentials
   (`vars.CASD_CLIENT_CERT`, `secrets.CASD_CLIENT_KEY`) come from the
   `bst-cache` environment, whose deployment branch policy is set to
-  `main` only; missing credentials log a clean skip. The step is
+  `main` only; missing credentials log a clean skip. The job is
   `continue-on-error`: a network blip never rolls back a release.
-  `tests/unit/test_cache_upload_allowlist.py` and
+  `tests/unit/test_cache_upload_allowlist.py`,
+  `tests/unit/test_cache_upload_sh.py`, and
   `tests/unit/test_cache_upload_workflow.py` enforce the safety net.
 
 ## Common Rationalizations

@@ -74,18 +74,24 @@ artifacts:
 EOF
 
 echo "Probing build cache state for ${#targets[@]} key-free elements..."
-mapfile -t cached_unpushed < <(
-    BST_FLAGS="--config /src/${dir}/probe.conf" \
-        just bst artifact show --deps none "${targets[@]}" 2>&1 \
-        | sed 's/\x1b\[[0-9;]*m//g' \
-        | awk '/^not cached/ {print $3}' || true
-)
+# bst artifact show prints "%{state: >12} %{name}" per artifact (BuildStream
+# formats `not cached` right-padded to 12 columns, then the name). After the
+# ANSI strip the line is "  not cached <name>". Capture the bst exit code
+# into a temp file so PIPESTATUS reflects the pipeline, not the mapfile.
+probe_log="${dir}/probe.log"
+probe_status=0
+BST_FLAGS="--config /src/${dir}/probe.conf" \
+    just bst artifact show --deps none "${targets[@]}" > "${probe_log}" 2>&1 \
+    || probe_status=$?
+sed 's/\x1b\[[0-9;]*m//g' "${probe_log}" \
+    | awk '$1=="not" && $2=="cached" {print $3}' > "${dir}/cached_unpushed.txt"
+mapfile -t cached_unpushed < "${dir}/cached_unpushed.txt"
 
 # If the probe fails entirely (network down, credentials expired), keep the
 # previous behaviour of doing nothing rather than uploading blindly.
-probe_status="${PIPESTATUS[2]:-0}"
 if [ "${probe_status}" -ne 0 ] && [ "${#cached_unpushed[@]}" -eq 0 ]; then
     echo "::warning ::cache-upload: bst artifact show failed; nothing uploaded"
+    cat "${probe_log}" >&2 || true
     exit 0
 fi
 
@@ -102,9 +108,9 @@ if [[ "${push_url}" == https://* ]]; then
             client-cert: /src/${dir}/client.crt"
 fi
 
-# FSDK's junctioned elements (zfs opens, k0s, …) need the push remote
-# configured for their project; ours can use the default project. Emit one
-# block per project we have to push.
+# Only this project's `default` project pushes from here: the allow-list is
+# local-element-only and the FSDK push needs to be coordinated with the
+# upstream FSDK project (out of #299 follow-up).
 {
     echo "projects:"
     cat <<EOF
@@ -115,16 +121,6 @@ fi
           push: true
           ${connection_config}${auth}
 EOF
-    if [[ "${push_url}" == https://* ]]; then
-        cat <<EOF
-  freedesktop-sdk:
-    artifacts:
-      servers:
-        - url: ${push_url}
-          push: true
-          ${connection_config}${auth}
-EOF
-    fi
 } > "${dir}/push.conf"
 
 echo "BuildStream push configuration:"

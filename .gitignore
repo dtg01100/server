@@ -2,6 +2,7 @@
 .bst
 .bst2
 .cache/*
+.cache-upload-push/
 *.img
 *.raw
 *.tar

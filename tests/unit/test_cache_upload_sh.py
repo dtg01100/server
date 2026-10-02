@@ -104,12 +104,13 @@ def test_secret_files_are_written_with_strict_permissions(tmp_path: Path) -> Non
         "CASD_CLIENT_KEY": key,
     }
     # Walk the script forward one step at a time; the tmp dir is the home,
-    # so the .cache-upload-push/ directory sits there.
+    # but the script `cd`s to its own parent (the repo root) before writing
+    # anything, so the push directory lands at ROOT/.cache-upload-push.
     proc = subprocess.Popen(
         ["bash", str(SCRIPT)], env=env, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
     proc.wait(timeout=10)
-    push_dir = tmp_path / ".cache-upload-push"
+    push_dir = ROOT / ".cache-upload-push"
     # The trap cleans up on exit, so the directory should be gone after the
     # script exits. (If we are early enough, it might still exist; the
     # important assertion is that nothing world-readable remains behind.)
