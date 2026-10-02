@@ -63,46 +63,39 @@ if grep -qE '^imports[[:space:]]*=' "${CONF}"; then
   exit 0
 fi
 
-# Insert the same two globs the kubeadm config ships with (`config.toml` and
-# #350's diff put `imports = [...]` at top level before `[grpc]`). Insertion
-# point is the first `[section]` table header in the config; if the file has
-# none, append at the end. containerd's TOML loader only consults a top-level
-# `imports` — placing it inside `[plugins.'io.containerd.cri.v1.runtime'.cni]`
-# (where the seeded kubeadm config currently ends) nests it as
-# `[plugins.*].imports` and is silently ignored, which is why appending
-# `imports = [...]` was not enough.
-#
-# A table header is anchored on a key character right after `[` (or `[[`) and
-# on the line ending in `]` with nothing but an optional comment after it, so
-# a continuation line of a top-level multi-line array (`foo = [` / `  ["a"],`
-# / `]`) is not mistaken for a section and the block is never inserted into
-# the middle of an array.
-INSERT_LINE=$(grep -n -m1 -E '^[[:space:]]*\[\[?[[:space:]]*["'"'"'A-Za-z0-9_-].*\][[:space:]]*(#.*)?$' "${CONF}" || true)
-if [ -n "${INSERT_LINE}" ]; then
-  insert_at=${INSERT_LINE%%:*}
-  log "inserting imports before line ${insert_at} of ${CONF}"
-  # Compose the new content into a sibling tmp file, then `cat` it back over
-  # the original inode so mode, owner and SELinux label survive a 0600
-  # install (umask would have set 0644 on a fresh file, and `mv` would have
-  # replaced a symlink with a regular file). Remove the tmp file on any
-  # failure so a half-built `${CONF}.new` does not linger on disk.
-  tmp="${CONF}.new.$$"
-  trap 'rm -f "${tmp}"' EXIT
-  {
-    head -n "$((insert_at - 1))" "${CONF}"
-    emit_imports_block
-    printf '\n'
-    tail -n "+${insert_at}" "${CONF}"
-  } > "${tmp}"
-  cat "${tmp}" > "${CONF}"
-  rm -f "${tmp}"
+# Insert the same two globs the kubeadm config ships with at the very top of
+# the file. Line 1 is the only insertion point that is always valid TOML: a
+# top-level key written after any `[table]` header would belong to that table,
+# and containerd's loader only consults a top-level `imports` — placing it
+# inside `[plugins.'io.containerd.cri.v1.runtime'.cni]` (where the seeded
+# kubeadm config currently ends) nests it as `[plugins.*].imports` and is
+# silently ignored, which is why appending `imports = [...]` was not enough.
+# Scanning for the first `[section]` header instead cannot reliably tell a
+# header from a continuation line of a multi-line top-level array
+# (`required_plugins = [` / `  ["a"]` / `]`), and guessing wrong corrupts the
+# config; prepending never can.
+log "inserting imports at the top of ${CONF}"
+# Compose the new content into a sibling tmp file, then `cat` it back over
+# the original inode so mode, owner and SELinux label survive a 0600
+# install (umask would have set 0644 on a fresh file, and `mv` would have
+# replaced a symlink with a regular file).
+tmp="${CONF}.new.$$"
+trap 'rm -f -- "${tmp}"' EXIT
+{
+  emit_imports_block
+  printf '\n'
+  cat -- "${CONF}"
+} > "${tmp}"
+
+# `cat > "${CONF}"` truncates before it writes, so a failure part-way (ENOSPC,
+# a read-only or immutable file) can leave the config truncated. Keep the tmp
+# file — the only complete copy of the migrated content — and name it in the
+# log so an operator can restore it; containerd.service runs this helper with
+# a `-` prefix, so a failure here never blocks the service.
+if ! cat -- "${tmp}" > "${CONF}"; then
   trap - EXIT
-else
-  # No table header, no top-level section yet. Append at the end and rely on
-  # containerd's tolerance for trailing content.
-  log "appending imports to ${CONF} (no section header found)"
-  {
-    printf '\n'
-    emit_imports_block
-  } >> "${CONF}"
+  log "ERROR: could not write ${CONF}; complete migrated content kept at ${tmp}"
+  exit 1
 fi
+rm -f -- "${tmp}"
+trap - EXIT

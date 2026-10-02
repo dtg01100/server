@@ -5,9 +5,9 @@ description: |
   plugins from kubeadm/kubeadm-bin.bst, plus containerd.service,
   kubelet.service with kubeadm's 10-kubeadm.conf drop-in, the default
   containerd config, crictl config, module and sysctl drop-ins, and a
-  one-shot migration that inserts the containerd `imports` glob at the top
-  level of a pre-existing /etc/containerd/config.toml (before its first
-  `[section]` table, where containerd's loader consults it) so drop-ins
+  one-shot migration that prepends the containerd `imports` glob at the top
+  level of a pre-existing /etc/containerd/config.toml (line 1, the only
+  always-valid placement for a top-level key) so drop-ins
   (the NVIDIA Container Toolkit sysext's `nvidia` runtime handler, node
   overrides in /etc/containerd/conf.d) deep-merge into the kubeadm config
   on the next containerd start. No preset enables anything; Ignition
@@ -65,7 +65,7 @@ config:
     install -D -m 0644 "${src}/config.toml" "sysext%{datadir}/bluefin/containerd/config.toml"
     install -D -m 0644 "${src}/crictl.yaml" "sysext%{datadir}/bluefin/kubeadm/crictl.yaml"
     install -D -m 0755 "${src}/bluefin-kubeadm-containerd-migrate" \
-      "sysext%{prefix}/libexec/bluefin-kubeadm-containerd-migrate"
+      "sysext%{libexecdir}/bluefin-kubeadm-containerd-migrate"
 
     case "$(cat "sysext%{datadir}/bluefin/containerd/config.toml")" in
       *'sandbox = "%{pause-image}"'*) ;;

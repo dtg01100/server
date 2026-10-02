@@ -113,24 +113,31 @@ copy regardless, which is what this migration is for.
 
 `/usr/libexec/bluefin-kubeadm-containerd-migrate` (run from
 `containerd.service` ExecStartPre, after tmpfiles and before `modprobe
-overlay`) is an idempotent backfill: it inserts the `imports` line at the
-top level of a config that lacks one and leaves a config that already
-declares one alone (no mtime change, no DaemonSet / kured false trigger).
-Top-level placement is load-bearing — containerd's TOML loader only
-consults a top-level `imports`; an `imports = [...]` appended at the end of
-a config that already closes inside a `[plugins.*]` table nests under that
-table as `[plugins.*].imports` and is silently ignored. The migrator finds
-the first `[section]` table header in the config — a line whose `[` (or
-`[[`) is followed by a key character and which ends in `]`, so a
-continuation line of a multi-line array is not mistaken for one — and
-inserts the imports block immediately before it (the same placement
-`files/kubeadm/sysext/config.toml` gets in PR #350); a config without any
-`[section]` table has the block appended, since there is nothing for it to
-land under. Diskless nodes reseed every boot from the source, so once #350
-has merged the migrator is a no-op there.
+overlay`) is an idempotent backfill: it prepends the `imports` line, with a
+comment blaming itself, at the very top of a config that lacks one, and
+leaves a config that already declares one alone (no mtime change, no
+DaemonSet / kured false trigger). Top-level placement is load-bearing —
+containerd's TOML loader only consults a top-level `imports`; an
+`imports = [...]` appended at the end of a config that already closes inside
+a `[plugins.*]` table nests under that table as `[plugins.*].imports` and is
+silently ignored. Line 1 is the only insertion point that is always valid
+TOML — a top-level key after any `[table]` header belongs to that table, and
+scanning for the first header cannot reliably distinguish a header from a
+continuation line of a multi-line top-level array (the last element of an
+array of arrays ends in `]` just like a header does). Diskless nodes reseed
+every boot from the source, so once #350 has merged the migrator is a no-op
+there.
+
+The helper never overwrites the config in place without a fallback: it builds
+the new content in a sibling `config.toml.new.<pid>` and copies it back over
+the original inode (mode, owner and SELinux label survive). If that copy
+fails (ENOSPC, read-only `/etc`), the complete new content is left in the
+sibling file and its path is logged, so a truncated config is recoverable.
+The ExecStartPre is `-`-prefixed: a node whose config.toml cannot be written
+(immutable, read-only) still starts containerd with its old config.
 
 The migration is shipped by the kubeadm sysext
-(`elements/oci/kubeadm-sysext.bst` installs it to `/usr/libexec/`) and
+(`elements/oci/kubeadm-sysext.bst` installs it to `%{libexecdir}`) and
 takes effect on the next `containerd.service` start after the node
 updates to a kubeadm version that contains it. Once PR #350 adds
 `nvidia-container-toolkit-activate.service`'s `try-restart

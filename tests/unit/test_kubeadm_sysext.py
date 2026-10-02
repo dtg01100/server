@@ -134,8 +134,10 @@ def test_etc_config_is_seeded_writable_before_containerd_starts() -> None:
     # on a fresh install) and before the kubelet modules are loaded; once it
     # is idempotent an installed node from before `imports` existed picks up
     # the glob on the next containerd start (issue #351).
-    assert "/usr/libexec/bluefin-kubeadm-containerd-migrate" in pre
-    assert pre.index("/usr/libexec/bluefin-kubeadm-containerd-migrate") < pre.index("/usr/bin/modprobe overlay")
+    # It is `-`-prefixed (best effort): a config the helper cannot rewrite
+    # (immutable, read-only /etc) must not keep containerd from starting.
+    assert "-/usr/libexec/bluefin-kubeadm-containerd-migrate" in pre
+    assert pre.index("-/usr/libexec/bluefin-kubeadm-containerd-migrate") < pre.index("/usr/bin/modprobe overlay")
     assert "/usr/bin/modprobe br_netfilter" in pre
     assert pre.index("/usr/bin/modprobe br_netfilter") < pre.index("/usr/lib/systemd/systemd-sysctl 90-kubeadm.conf")
     svc = unit(SRC / "containerd.service")
@@ -148,10 +150,11 @@ def test_etc_config_is_seeded_writable_before_containerd_starts() -> None:
 def test_kubeadm_sysext_ships_the_config_migration_helper() -> None:
     bst = SYSEXT.read_text(encoding="utf-8")
     assert "bluefin-kubeadm-containerd-migrate" in bst
-    # The helper lives under /usr/libexec (same prefix as the CNI binaries
-    # the sysext installs at %{libexecdir}/cni; containerd.service calls it
-    # by its absolute path, so the install path must match).
-    assert 'sysext%{prefix}/libexec/bluefin-kubeadm-containerd-migrate' in bst
+    # The helper lives under %{libexecdir}, the same idiom every sibling
+    # helper the images ship uses (bluefin-kubeadm-init, nvidia-load,
+    # bluefin-homelab-apply); containerd.service calls it by its absolute
+    # path, so the install path must match.
+    assert 'sysext%{libexecdir}/bluefin-kubeadm-containerd-migrate' in bst
     helper = SRC / "bluefin-kubeadm-containerd-migrate"
     assert helper.exists(), "the helper script ships with the sysext"
     assert helper.stat().st_mode & 0o111, "the helper is executable"

@@ -89,7 +89,7 @@ def test_helper_is_shellcheck_clean_at_warning_level(shellcheck: str) -> None:
     subprocess.run([shellcheck, "-S", "warning", str(HELPER)], check=True)
 
 
-def test_appends_imports_to_a_pre_existing_config_without_them(tmp_path: Path) -> None:
+def test_prepends_imports_to_a_pre_existing_config_without_them(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_seeded_kubeadm_config(), encoding="utf-8")
     original = config.read_text(encoding="utf-8")
@@ -99,10 +99,8 @@ def test_appends_imports_to_a_pre_existing_config_without_them(tmp_path: Path) -
     assert result.returncode == 0, result.stderr
     migrated = config.read_text(encoding="utf-8")
     # The original content is preserved as a contiguous block; the migration
-    # inserts the imports block immediately before the first `[section]`
-    # table header (`[grpc]`), so the file is the seed with the imports
-    # block prefixed in place of where `[grpc]` would otherwise be the first
-    # post-version content. containerd's TOML loader only consults a
+    # prepends the imports block at line 1, so the file is the seed with the
+    # block in front of it. containerd's TOML loader only consults a
     # top-level `imports`, so a substring check is insufficient — verify
     # the parsed structure carries the imports at the top level and nowhere
     # else.
@@ -133,9 +131,9 @@ def test_appends_imports_to_a_pre_existing_config_without_them(tmp_path: Path) -
     # not lose any table the kubeadm sysext or operators configured).
     assert 'address = "/run/containerd/containerd.sock"' in migrated
     assert "registry.k8s.io/pause:3.10.1" in migrated
-    # The imports block lands before the first [section] table, so the
-    # blame comment precedes [grpc] in the file.
-    assert migrated.index("# Added by bluefin-kubeadm-containerd-migrate") < migrated.index("[grpc]")
+    # The block lands at the top of the file, so the blame comment precedes
+    # every line the seed carried.
+    assert migrated.startswith("# Added by bluefin-kubeadm-containerd-migrate")
     # Sanity: the original file's content is still all there (none of the
     # seeded lines are dropped or reordered).
     for line in original.strip().splitlines():
@@ -191,9 +189,7 @@ def test_missing_config_is_a_no_op(tmp_path: Path) -> None:
 def test_top_level_imports_when_config_has_no_section_header(tmp_path: Path) -> None:
     # Some pre-imports kubeadm configs (operator hand-rolls) reach the
     # migrator with only top-level scalars and no [section] table. The
-    # migrator must still land `imports` at top level so containerd sees it
-    # — appending is correct because there's no `[section]` for it to nest
-    # inside.
+    # migrator must still land `imports` at top level so containerd sees it.
     config = tmp_path / "config.toml"
     config.write_text('version = 3\nroot = "/var/lib/containerd"\n', encoding="utf-8")
 
@@ -214,15 +210,16 @@ def test_top_level_imports_when_config_has_no_section_header(tmp_path: Path) -> 
 
 def test_multi_line_top_level_array_is_not_split_by_the_insertion(tmp_path: Path) -> None:
     # A continuation line of a top-level multi-line array starts with `[`
-    # too. If the migrator treated it as a `[section]` header it would drop
-    # the imports block inside the array and containerd would refuse to
-    # start on that node.
+    # too, and the last element of an array of arrays carries no trailing
+    # comma, so it ends in `]` exactly like a table header. If the migrator
+    # treated either as a `[section]` header it would drop the imports block
+    # inside the array and containerd would refuse to start on that node.
     config = tmp_path / "config.toml"
     config.write_text(
         'version = 3\n'
         'required_plugins = [\n'
         '  ["io.containerd.grpc.v1.cri"],\n'
-        '  ["io.containerd.internal.v1.opt"],\n'
+        '  ["io.containerd.internal.v1.opt"]\n'
         ']\n'
         '\n'
         '[grpc]\n'
@@ -243,10 +240,15 @@ def test_multi_line_top_level_array_is_not_split_by_the_insertion(tmp_path: Path
         ["io.containerd.grpc.v1.cri"],
         ["io.containerd.internal.v1.opt"],
     ]
-    # The block must land before the first real table header, not inside the
-    # array above it.
+    # The block lands at the top of the file, ahead of the array and of the
+    # first table header — never between the array's elements.
+    assert migrated.index(EXPECTED_IMPORTS) < migrated.index("required_plugins")
     assert migrated.index(EXPECTED_IMPORTS) < migrated.index("[grpc]")
-    assert migrated.index("]\n") < migrated.index(EXPECTED_IMPORTS)
+
+
+def test_a_pre_existing_commented_imports_block_does_not_get_a_second_entry(
+    tmp_path: Path,
+) -> None:
     # Some operators comment the import line they ship. The migrator must
     # not append a second `imports = [...]` and end up with two entries.
     config = tmp_path / "config.toml"
@@ -301,21 +303,27 @@ def test_mode_owner_and_inode_survive(tmp_path: Path) -> None:
     assert leftovers == [], f"tmpfile leaked after success: {leftovers}"
 
 
-def test_tmpfile_is_cleaned_up_on_failure(tmp_path: Path) -> None:
-    # If the migrator cannot write the new content (read-only config, full
-    # disk, …), it must not leave a `${CONF}.new` half-built on disk that a
-    # subsequent containerd restart could pick up. chmod the config
-    # read-only so the `cat > "${CONF}"` step fails.
+def test_failed_write_keeps_the_complete_migrated_content(tmp_path: Path) -> None:
+    # `cat > "${CONF}"` truncates before it writes, so a failure part-way
+    # (ENOSPC, read-only or immutable config) could leave the node with a
+    # truncated /etc/containerd/config.toml. The migrator must keep the tmp
+    # file — the only complete copy — and name it on stderr, never delete it
+    # and leave the operator with nothing to restore.
     config = tmp_path / "config.toml"
     config.write_text(_seeded_kubeadm_config(), encoding="utf-8")
     config.chmod(0o444)
 
     result = _run(config)
 
-    assert result.returncode != 0, result.stderr
-    # No `${CONF}.new*` may remain on disk after the failure.
+    assert result.returncode != 0, result.stdout
     leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(f"{config.name}.new")]
-    assert leftovers == [], f"tmpfile leaked after failure: {leftovers}"
+    assert len(leftovers) == 1, f"the complete content must survive: {leftovers}"
+    kept = leftovers[0].read_text(encoding="utf-8")
+    assert EXPECTED_IMPORTS in kept
+    assert 'address = "/run/containerd/containerd.sock"' in kept
+    assert str(leftovers[0]) in result.stderr, "the kept file is named in the log"
+    # The read-only config itself is untouched (the redirect never opened it).
+    assert config.read_text(encoding="utf-8") == _seeded_kubeadm_config()
 
 
 def test_migrator_is_invoked_before_kubelet_modules_load(tmp_path: Path) -> None:
@@ -326,7 +334,8 @@ def test_migrator_is_invoked_before_kubelet_modules_load(tmp_path: Path) -> None
     # shipping unit text directly.
     service = (REPO_ROOT / "files" / "kubeadm" / "sysext" / "containerd.service").read_text()
     pre = [line.split("=", 1)[1] for line in service.splitlines() if line.startswith("ExecStartPre=")]
-    assert "/usr/libexec/bluefin-kubeadm-containerd-migrate" in pre
-    migrate = pre.index("/usr/libexec/bluefin-kubeadm-containerd-migrate")
+    # `-`-prefixed: best effort, so a write failure cannot stop containerd.
+    assert "-/usr/libexec/bluefin-kubeadm-containerd-migrate" in pre
+    migrate = pre.index("-/usr/libexec/bluefin-kubeadm-containerd-migrate")
     assert pre.index("/usr/bin/systemd-tmpfiles --create kubeadm.conf") < migrate
     assert pre.index("/usr/bin/modprobe overlay") > migrate
