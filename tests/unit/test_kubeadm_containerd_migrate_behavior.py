@@ -240,6 +240,44 @@ def test_unknown_argument_is_rejected(tmp_path: Path) -> None:
     assert config.read_text(encoding="utf-8") == _seeded_kubeadm_config()
 
 
+def test_mode_owner_and_inode_survive(tmp_path: Path) -> None:
+    # containerd.service installs /etc/containerd/config.toml at 0600; if the
+    # migrator's `mv` over the existing file dropped it back to umask 0644
+    # (or replaced a symlink with a regular file), operators who locked the
+    # file down lose that on every containerd restart. Verify the file's
+    # mode and inode are preserved across the migration.
+    config = tmp_path / "config.toml"
+    config.write_text(_seeded_kubeadm_config(), encoding="utf-8")
+    config.chmod(0o600)
+    before_inode = config.stat().st_ino
+    before_mode = config.stat().st_mode & 0o777
+
+    result = _run(config)
+
+    assert result.returncode == 0, result.stderr
+    assert config.stat().st_ino == before_inode
+    assert (config.stat().st_mode & 0o777) == before_mode
+    # No `${CONF}.new` may be left behind on success.
+    assert not (tmp_path / f"{config.name}.new.1").exists()
+
+
+def test_tmpfile_is_cleaned_up_on_failure(tmp_path: Path) -> None:
+    # If the migrator cannot write the new content (read-only config, full
+    # disk, …), it must not leave a `${CONF}.new` half-built on disk that a
+    # subsequent containerd restart could pick up. chmod the config
+    # read-only so the `cat > "${CONF}"` step fails.
+    config = tmp_path / "config.toml"
+    config.write_text(_seeded_kubeadm_config(), encoding="utf-8")
+    config.chmod(0o444)
+
+    result = _run(config)
+
+    assert result.returncode != 0, result.stderr
+    # No `${CONF}.new*` may remain on disk after the failure.
+    leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(f"{config.name}.new")]
+    assert leftovers == [], f"tmpfile leaked after failure: {leftovers}"
+
+
 def test_migrator_is_invoked_before_kubelet_modules_load(tmp_path: Path) -> None:
     # The migration writes to /etc/containerd/config.toml, then containerd
     # must load its config (which now imports the drops) before

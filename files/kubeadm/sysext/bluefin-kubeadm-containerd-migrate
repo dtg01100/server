@@ -66,6 +66,13 @@ INSERT_LINE=$(grep -n -m1 -E '^[[:space:]]*\[[^]]+\]' "${CONF}" || true)
 if [ -n "${INSERT_LINE}" ]; then
   insert_at=${INSERT_LINE%%:*}
   log "inserting imports before line ${insert_at} of ${CONF}"
+  # Compose the new content into a sibling tmp file, then `cat` it back over
+  # the original inode so mode, owner and SELinux label survive a 0600
+  # install (umask would have set 0644 on a fresh file, and `mv` would have
+  # replaced a symlink with a regular file). Remove the tmp file on any
+  # failure so a half-built `${CONF}.new` does not linger on disk.
+  tmp="${CONF}.new.$$"
+  trap 'rm -f "${tmp}"' EXIT
   {
     head -n "$((insert_at - 1))" "${CONF}"
     printf '# Added by %s on containerd start: drop-ins (NVIDIA Container Toolkit\n' "${PROG}"
@@ -75,12 +82,14 @@ if [ -n "${INSERT_LINE}" ]; then
     printf 'imports = ["/usr/share/bluefin/containerd/conf.d/*.toml", "/etc/containerd/conf.d/*.toml"]\n'
     printf '\n'
     tail -n "+${insert_at}" "${CONF}"
-  } > "${CONF}.new"
-  mv "${CONF}.new" "${CONF}"
+  } > "${tmp}"
+  cat "${tmp}" > "${CONF}"
+  rm -f "${tmp}"
+  trap - EXIT
 else
   # No table header, no top-level section yet. Append at the end and rely on
   # containerd's tolerance for trailing content.
   log "appending imports to ${CONF} (no section header found)"
-  printf '\n# Added by %s on containerd start: drop-ins (NVIDIA Container Toolkit\n# sysext'"'"'s `nvidia` runtime handler, node overrides in /etc/containerd/conf.d)\n# deep-merge into this config via containerd'"'"'s `imports` glob. See\n# docs/skills/kubeadm-sysext.md.\nimports = ["/usr/share/bluefin/containerd/conf.d/*.toml", "/etc/containerd/conf.d/*.toml"]\n' \
+  printf '\n# Added by %s on containerd start: drop-ins (NVIDIA Container Toolkit\n# sysext'"'"'s `nvidia` runtime handler, node overrides in /etc/containerd/conf.d)\n# deep-merge into this config via containerd'"'"'s `imports\` glob. See\n# docs/skills/kubeadm-sysext.md.\nimports = ["/usr/share/bluefin/containerd/conf.d/*.toml", "/etc/containerd/conf.d/*.toml"]\n' \
     "${PROG}" >> "${CONF}"
 fi
