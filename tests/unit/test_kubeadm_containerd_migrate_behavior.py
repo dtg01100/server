@@ -20,6 +20,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / "files" / "kubeadm" / "sysext" / "bluefin-kubeadm-containerd-migrate"
+SHIPPED_CONFIG = REPO_ROOT / "files" / "kubeadm" / "sysext" / "config.toml"
 
 EXPECTED_IMPORTS = (
     'imports = ["/usr/share/bluefin/containerd/conf.d/*.toml", '
@@ -155,6 +156,24 @@ def test_idempotent_when_imports_already_present(tmp_path: Path) -> None:
     # and a false trigger on every containerd restart would be a regression.
     assert config.stat().st_mtime_ns == before_mtime
     assert config.stat().st_ino == before_inode
+
+
+def test_shipped_config_is_left_untouched(tmp_path: Path) -> None:
+    # Fresh installs and diskless boots seed the shipped config, which already
+    # carries the exact line the helper backfills: seeding it must not trigger
+    # a rewrite, and a migrated legacy node must import the same globs.
+    shipped = SHIPPED_CONFIG.read_text(encoding="utf-8")
+    assert EXPECTED_IMPORTS in shipped.splitlines()
+    config = tmp_path / "config.toml"
+    config.write_text(shipped, encoding="utf-8")
+    before = config.stat()
+
+    result = _run(config)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert config.read_text(encoding="utf-8") == shipped
+    assert (config.stat().st_mtime_ns, config.stat().st_ino) == (before.st_mtime_ns, before.st_ino)
 
 
 def test_existing_config_with_user_overrides_is_preserved(tmp_path: Path) -> None:
