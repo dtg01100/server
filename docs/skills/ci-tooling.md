@@ -4,7 +4,7 @@ description: CI workflow conventions for Bluefin Server. Use when writing or edi
 metadata:
   type: reference
   status: stable
-  last_updated: "2026-09-30"
+  last_updated: "2026-10-02"
   context7-sources:
     - /websites/github_en_actions
     - /websites/cli_github_manual
@@ -280,6 +280,24 @@ version) and the NVIDIA Container Toolkit (Go); the driver sysext adds about
 - **No `actions/cache`.** A full build's cache holds `boot-keys.bst`, and
   pull requests can restore caches saved on `main`; the key-free kernel cache
   is 5 GB, half the 10 GB repository quota, so it lives in ghcr.io instead.
+- **Org CAS upload for the rest of the key-free graph.** The kernel cache
+  covers `freedesktop-sdk.bst:components/linux.bst` and
+  `components/go.bst`; everything else (`ignition/ignition.bst`,
+  `k0s/k0s-bin.bst`, `kubeadm/kubeadm-bin.bst`,
+  `oci/{k0s,kubeadm,kubestellar,nvidia-container-toolkit}-sysext.bst`,
+  `zfs/openzfs.bst`, and the unsigned NVIDIA binaries) goes through
+  `scripts/cache-upload.sh` after `just export-image`, on direct pushes to
+  `refs/heads/main` only. The push remote is generated for the duration of
+  the script and only ever passed to `bst artifact push --deps none`; the
+  `bst push` step never runs while `bst build` does. The element list
+  comes from `.github/scripts/cache-upload-allowlist.py`, which fails closed
+  if any of those elements is key-derived. The mTLS credentials
+  (`vars.CASD_CLIENT_CERT`, `secrets.CASD_CLIENT_KEY`) come from the
+  `bst-cache` environment, whose deployment branch policy is set to
+  `main` only; missing credentials log a clean skip. The step is
+  `continue-on-error`: a network blip never rolls back a release.
+  `tests/unit/test_cache_upload_allowlist.py` and
+  `tests/unit/test_cache_upload_workflow.py` enforce the safety net.
 
 ## Common Rationalizations
 

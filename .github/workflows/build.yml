@@ -316,6 +316,24 @@ jobs:
       - name: Build and export the image set
         run: just export-image
 
+      # Project #299 follow-up: push the key-free BuildStream elements this
+      # build produced to cache.projectbluefin.io:11002 so the next main run
+      # starts warm. The push remote only exists while `scripts/cache-upload.sh`
+      # runs (never during `bst build`); the explicit element list and the
+      # fails-closed allow-list script ensure no signing key is uploaded; the
+      # `bst-cache` environment (deployment branch policy on main) gates the
+      # credentials to direct pushes on `main` only. Missing credentials
+      # produce a clean skip; a failed upload must never fail a release.
+      - name: Upload key-free BuildStream artifacts to the org CAS
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        environment:
+          name: bst-cache
+        continue-on-error: true
+        env:
+          CASD_CLIENT_CERT: ${{ vars.CASD_CLIENT_CERT }}
+          CASD_CLIENT_KEY: ${{ needs.changes.outputs.release == 'true' && secrets.CASD_CLIENT_KEY || '' }}
+        run: bash scripts/cache-upload.sh
+
       # The image set carries its own signed SHA256SUMS(.gpg) covering the
       # OS images, UKIs and the k0s/KubeStellar/OpenZFS sysexts.
       - name: Upload image artifacts
