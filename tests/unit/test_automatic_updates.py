@@ -28,6 +28,10 @@ ELEMENTS = ROOT / "elements" / "bluefin-server"
 DISKLESS = UNITS / "systemd-sysupdate.service.d" / "10-diskless.conf"
 KURED = UNITS / "systemd-sysupdate.service.d" / "20-kured.conf"
 INTERLOCK = UNITS / "systemd-sysupdate-reboot.service.d" / "20-interlock.conf"
+STATUS_HOOK = UNITS / "systemd-sysupdate.service.d" / "30-update-status.conf"
+STATUS_UNIT = UNITS / "bluefin-update-status.service"
+STATUS_SCRIPT = ROOT / "files" / "os" / "update-check" / "usr" / "libexec" / "bluefin-update-status"
+MOTD_LINK = ROOT / "files" / "os" / "tmpfiles.d" / "40-bluefin-motd.conf"
 DISKLESS_ONLY = "/run/machines/rootdisk.raw"
 
 
@@ -69,6 +73,7 @@ def test_preset_enables_the_update_timers_and_the_health_gate() -> None:
         ["enable", "systemd-sysupdate-reboot.timer"],
         ["enable", "systemd-boot-check-no-failures.service"],
         ["enable", "bluefin-boot-deadline.timer"],
+        ["enable", "bluefin-update-status.service"],
         ["enable", "bluefin-diskless-update-check.timer"],
     ]
 
@@ -89,6 +94,7 @@ def test_no_base_image_preset_enables_kubernetes_or_zfs() -> None:
 @pytest.mark.parametrize(
     "dropin",
     [
+        "bluefin-update-status.service",
         "systemd-sysupdate-reboot.service.d/10-diskless.conf",
         "systemd-sysupdate.timer.d/10-diskless.conf",
         "systemd-sysupdate-reboot.timer.d/10-diskless.conf",
@@ -187,3 +193,39 @@ def test_kured_hook_moved_into_the_unit_directory() -> None:
     assert "bluefin-server/os-k0s-first-boot.bst" in stack, "installs files/os/systemd/system"
     assert "bluefin-server/os-kured-hook.bst" not in stack
     assert not (ROOT / "files" / "os" / "systemd" / "systemd-sysupdate.service.d").exists()
+
+
+def test_every_update_run_refreshes_the_login_banners() -> None:
+    # A failed run stays a failed unit and also reaches the console and SSH
+    # banners; a successful one clears the error there.
+    unit = ini(STATUS_HOOK)["Unit"]
+    assert unit["OnSuccess"] == "bluefin-update-status.service"
+    assert unit["OnFailure"] == "bluefin-update-status.service"
+
+
+def test_update_checks_wait_for_a_counted_boot_to_be_judged() -> None:
+    # An unreachable update source must never fail a unit before
+    # systemd-boot-check-no-failures has blessed a boot-counted image.
+    assert ini(STATUS_HOOK)["Unit"]["After"] == "boot-complete.target"
+
+
+def test_the_banner_unit_runs_the_status_helper_with_persistent_state() -> None:
+    service = ini(STATUS_UNIT)["Service"]
+    assert service["Type"] == "oneshot"
+    assert service["ExecStart"] == "/usr/libexec/bluefin-update-status"
+    assert service["StateDirectory"] == "bluefin-update-status"
+    assert "/var/lib/bluefin-update-status" in STATUS_SCRIPT.read_text(encoding="utf-8")
+    assert STATUS_SCRIPT.stat().st_mode & stat.S_IXUSR
+    assert ini(STATUS_UNIT)["Install"]["WantedBy"] == "multi-user.target"
+
+
+def test_the_banners_are_the_files_agetty_login_and_sshd_read() -> None:
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+    # agetty merges /run/issue.d with the image's /usr/lib/issue.d banner.
+    assert "/run/issue.d/40-bluefin-update.issue" in script
+    assert (ROOT / "files" / "os" / "issue.d" / "30-bluefin.issue").name < "40-bluefin-update.issue"
+    # shadow's login (MOTD_FILE /etc/motd) and sshd (UsePAM no) read only
+    # /etc/motd; it links to the runtime file, never over an operator's own.
+    assert "/run/motd" in script
+    lines = [line.split() for line in MOTD_LINK.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")]
+    assert lines == [["L", "/etc/motd", "-", "-", "-", "-", "../run/motd"]]

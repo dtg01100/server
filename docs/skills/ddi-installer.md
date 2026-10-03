@@ -4,7 +4,7 @@ description: Use when building or debugging the Bluefin Server boot chain, the d
 metadata:
   type: reference
   status: stable
-  last_updated: "2026-09-30"
+  last_updated: "2026-10-03"
   context7-sources:
     - /systemd/systemd
     - /apache/buildstream
@@ -195,6 +195,9 @@ only when a newer version than the booted one is installed.
   good only after `boot-complete.target`. A good boot is one that reaches
   `multi-user.target` with no failed unit. Only sysupdate-installed UKIs are
   counted, so diskless boots never pull in `boot-complete.target`.
+  `systemd-sysupdate.service.d/30-update-status.conf` orders every update
+  check after `boot-complete.target`, so an update source that cannot be
+  reached never fails a unit before a counted boot is judged.
 - **Rollback.** systemd-boot only moves on at the *next* boot, so the preset
   also enables `bluefin-boot-deadline.timer`. It runs on boot-counted boots
   only (the `LoaderBootCountPath` EFI variable exists; never on diskless,
@@ -245,7 +248,10 @@ only when a newer version than the booted one is installed.
   stop updating. Presets apply on first boot only, so nodes installed before
   this preset need `systemctl preset systemd-sysupdate.timer
   systemd-sysupdate-reboot.timer systemd-boot-check-no-failures.service
-  bluefin-boot-deadline.timer` once.
+  bluefin-boot-deadline.timer bluefin-update-status.service` once.
+- **Update health** (version, last check, staged update, last error) is on
+  the console and SSH login banners; see "Update health on the node" in
+  [systemd-sysupdate-verification.md](systemd-sysupdate-verification.md).
 
 ### Diskless and installer boots
 

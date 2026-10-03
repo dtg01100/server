@@ -4,7 +4,7 @@ description: The offline USB installer bluefin-server-installer_<ver>.raw. Load 
 metadata:
   type: reference
   status: stable
-  last_updated: "2026-10-01"
+  last_updated: "2026-10-03"
   context7-sources:
     - /systemd/systemd
 ---
@@ -113,7 +113,11 @@ Power-cycle and boot the stick again to retry.
 
 The installed disk is identical to one a diskless node installs: stock
 `systemd-sysinstall` with the layout from `files/os/repart.d/` (see
-[ddi-installer.md](ddi-installer.md), "Installing to disk").
+[ddi-installer.md](ddi-installer.md), "Installing to disk"). It updates
+itself from the official releases with no further steps, and its login
+banner shows the version, the last update check and any update error; see
+"Update health on the node" in
+[systemd-sysupdate-verification.md](systemd-sysupdate-verification.md).
 
 ## Homelab entries
 
