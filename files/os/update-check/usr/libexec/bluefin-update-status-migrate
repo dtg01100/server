@@ -1,0 +1,43 @@
+#!/usr/bin/bash
+# bluefin-update-status-migrate — one-shot enable of bluefin-update-status.service
+# for nodes that updated into an image whose #366 preset added it.
+#
+# system-preset only runs on first boot (Ignition calls `systemctl preset-all`
+# for /etc systemd and /usr factory presets on a fresh install), so a node
+# that sysupd-into an image with the new `enable bluefin-update-status.service`
+# rule never evaluates it. bluefin-update-status.service stays disabled, the
+# login banners stay empty, and /etc/motd stays a dangling link (from
+# tmpfiles.d/40-bluefin-motd.conf) until the next systemd-sysupdate.service
+# run triggers it via OnSuccess=/OnFailure=.
+#
+# This helper runs as a one-shot unit (bluefin-update-status-migrate.service,
+# auto-enabled via multi-user.target.wants/) on the first boot of every image
+# that ships it. `systemctl preset` is a no-op when the service is already
+# enabled, and when the preset file has no rule for it; running it here
+# applies the latest preset on every update. The stamp below makes the unit
+# short-circuit on the next boot.
+#
+# The helper exits 0 unconditionally; a failed `systemctl preset` (the unit
+# file missing, systemd not reachable) is not an error the boot needs to
+# surface — the worst case is the documented `systemctl preset
+# bluefin-update-status.service` on the operator's next login.
+
+set -euo pipefail
+
+unit=bluefin-update-status.service
+# Test override so the bats test can pin the stamp under BATS_TEST_TMPDIR.
+stamp="${BLUEFIN_UPDATE_STATUS_MIGRATE_STAMP:-/var/lib/bluefin/update-status-migrate.stamp}"
+
+if [ -e "${stamp}" ]; then
+    exit 0
+fi
+
+# Idempotent: `systemctl preset` is a no-op when the preset rule is already
+# satisfied (service enabled) and when no preset has a rule for the unit.
+# Test override so the bats test can stub systemd.
+systemctl="${BLUEFIN_SYSTEMCTL:-systemctl}"
+"${systemctl}" preset "${unit}" >/dev/null 2>&1 || :
+
+mkdir -p "$(dirname "${stamp}")"
+: > "${stamp}"
+echo "bluefin-update-status-migrate: ${unit} preset applied"

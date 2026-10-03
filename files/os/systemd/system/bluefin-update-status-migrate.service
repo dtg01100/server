@@ -1,0 +1,20 @@
+[Unit]
+Description=Enable bluefin-update-status.service on nodes that updated into this image
+Documentation=file:/usr/libexec/bluefin-update-status-migrate
+# Apply the latest 80-bluefin-updates.preset to bluefin-update-status.service
+# for nodes that updated into an image where the preset added it (projectbluefin/server#366,
+# projectbluefin/server#367). The unit file must exist for the preset to be
+# applicable; before #366 lands it does not, and we have nothing to do.
+ConditionPathExists=/usr/lib/systemd/system/bluefin-update-status.service
+# Run before anything reads the banners; tmpfiles is what makes /etc/motd a
+# link into /run/motd, and the service we enable writes /run/motd.
+After=systemd-tmpfiles-setup.service
+Before=systemd-user-sessions.service agetty.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/bluefin-update-status-migrate
+
+[Install]
+WantedBy=multi-user.target

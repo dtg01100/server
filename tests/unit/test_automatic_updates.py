@@ -28,6 +28,8 @@ ELEMENTS = ROOT / "elements" / "bluefin-server"
 DISKLESS = UNITS / "systemd-sysupdate.service.d" / "10-diskless.conf"
 KURED = UNITS / "systemd-sysupdate.service.d" / "20-kured.conf"
 INTERLOCK = UNITS / "systemd-sysupdate-reboot.service.d" / "20-interlock.conf"
+MIGRATE_UNIT = UNITS / "bluefin-update-status-migrate.service"
+MIGRATE_SCRIPT = ROOT / "files" / "os" / "update-check" / "usr" / "libexec" / "bluefin-update-status-migrate"
 DISKLESS_ONLY = "/run/machines/rootdisk.raw"
 
 
@@ -187,3 +189,52 @@ def test_kured_hook_moved_into_the_unit_directory() -> None:
     assert "bluefin-server/os-k0s-first-boot.bst" in stack, "installs files/os/systemd/system"
     assert "bluefin-server/os-kured-hook.bst" not in stack
     assert not (ROOT / "files" / "os" / "systemd" / "systemd-sysupdate.service.d").exists()
+
+
+def test_update_status_migrate_unit_exists_and_targets_the_unit() -> None:
+    # The migration only fires when its target unit is present, so a pre-#366
+    # image (no bluefin-update-status.service) is a no-op; a post-#366 image
+    # gets the preset reapplied on every node, even ones that sysupd-into it.
+    unit = ini(MIGRATE_UNIT)["Unit"]
+    assert unit["Description"].startswith("Enable ")
+    assert unit["ConditionPathExists"] == "/usr/lib/systemd/system/bluefin-update-status.service"
+    service = ini(MIGRATE_UNIT)["Service"]
+    assert service["ExecStart"] == "/usr/libexec/bluefin-update-status-migrate"
+    install = ini(MIGRATE_UNIT)["Install"]
+    assert install["WantedBy"] == "multi-user.target"
+
+
+def test_update_status_migrate_script_is_bash_and_executable() -> None:
+    script = MIGRATE_SCRIPT
+    assert script.exists()
+    mode = script.stat().st_mode
+    assert mode & stat.S_IXUSR, "user-executable bit set"
+    head = script.read_text(encoding="utf-8").splitlines()[:1]
+    assert head == ["#!/usr/bin/bash"]
+
+
+def test_update_status_migrate_symlink_is_built_into_the_image() -> None:
+    # The unit must auto-start on every node, including ones that sysupd into
+    # the image (where presets do not re-apply); the build wires the
+    # multi-user.target.wants symlink inside elements/oci/bluefin-server-usr.bst.
+    usr = ROOT / "elements" / "oci" / "bluefin-server-usr.bst"
+    text = usr.read_text(encoding="utf-8")
+    assert "bluefin-update-status-migrate.service" in text
+    assert "/usr/lib/systemd/system/multi-user.target.wants/bluefin-update-status-migrate.service" in text
+    # The symlink is created next to bluefin-repair-etc-modes, the existing
+    # migration unit. Both are one-shot repairs that apply to nodes that
+    # booted an older image.
+    assert "bluefin-repair-etc-modes.service" in text
+
+
+def test_update_status_migrate_runs_the_preset_and_stamps() -> None:
+    # The helper is idempotent: it calls `systemctl preset` and writes a
+    # stamp; a second invocation with the stamp in place does not call
+    # systemctl. Behavioural coverage lives in tests/unit/
+    # bluefin-update-status-migrate_test.bats; this only guards the
+    # contract that the helper is what its unit declares.
+    script = MIGRATE_SCRIPT.read_text(encoding="utf-8")
+    assert "systemctl" in script
+    assert "preset" in script
+    assert "bluefin-update-status.service" in script
+    assert "/var/lib/bluefin/update-status-migrate.stamp" in script

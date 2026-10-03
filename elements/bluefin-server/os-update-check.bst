@@ -15,6 +15,13 @@ description: |
   - bluefin-update-pending: `systemd-sysupdate pending`, minus a version whose
     UKI already used up its boot tries; gates the kured flag and the nightly
     reboot so a rolled-back node does not reboot into it again.
+  - bluefin-update-status-migrate, run by bluefin-update-status-migrate.service
+    (one-shot, enabled via multi-user.target.wants/ in
+    elements/oci/bluefin-server-usr.bst): reapplies the latest
+    80-bluefin-updates.preset against bluefin-update-status.service on the
+    next boot after a node sysupd-into an image where the preset added the
+    enable line; gated on the unit file existing and stamped so it never
+    runs again. (projectbluefin/server#367)
   - bluefin-sysext-fetch, run by the opt-in bluefin-sysext-fetch.service
     (disabled by 80-bluefin-opt-in.preset; the homelab Ignition templates
     link it): once per image version, installs the version-locked sysexts of
