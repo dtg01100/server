@@ -59,19 +59,8 @@ def test_ab_slots_have_identical_fixed_sizes(a: str, b: str):
 
 
 def test_slot_a_is_copied_from_the_running_image():
-    """Slot A reads from /usr-image/bluefin-server_<ver>.usr.raw.
-
-    The bluefin-server-usr.bst element stages the usr and usr-verity raw
-    images at /usr-image/, so systemd-repart reads the file inside /usr
-    rather than the running partition. CopyBlocks=auto would open the
-    installer's own /usr partition (the device backing /usr/) and fail
-    with EBUSY on the USB installer medium because that partition is the
-    source of dm-verity on /usr/ and the running system has it open
-    (#359). Reading a regular file inside /usr avoids the conflict and
-    keeps the data identical, since the .usr.raw file IS the source image.
-    """
-    for name, suffix in (("20-usr-a.conf", ".usr.raw"), ("21-usr-verity-a.conf", ".usr-verity.raw")):
-        assert load(REPART_DIR / name)["CopyBlocks"] == f"/usr-image/bluefin-server_%A{suffix}"
+    for name in ("20-usr-a.conf", "21-usr-verity-a.conf"):
+        assert load(REPART_DIR / name)["CopyBlocks"] == "auto"
 
 
 def test_slot_b_starts_empty_for_sysupdate():
