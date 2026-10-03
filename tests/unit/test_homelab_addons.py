@@ -129,7 +129,9 @@ def test_no_secret_material_is_vendored() -> None:
                 continue
             assert not data, f"{path.relative_to(ROOT)}: Secret {name} carries {sorted(data)}"
     text = "".join(p.read_text() for p in files())
-    assert "DEV_MODE" not in text, "the Console signs in with GitHub only"
+    # The Console's built-in admin sign-in works without its DEV_MODE (which
+    # also turns off checks elsewhere); 11-login-gate.yaml guards it.
+    assert "DEV_MODE" not in text
 
 
 def applier_inputs() -> set[str]:
@@ -145,7 +147,8 @@ def test_placeholders_are_applier_inputs_and_stay_strings() -> None:
             for _, value in strings(doc):
                 if "${HOMELAB_" in value and "\n" not in value:
                     assert f'"{value}"' in path.read_text() or f"'{value}'" in path.read_text(), value
-    assert used == {"DOMAIN", "MCP_READ_ONLY", "MCP_READ_WRITE"}
+    assert used == {"DOMAIN", "MCP_READ_ONLY", "MCP_READ_WRITE", "KUBESTELLAR_CONSOLE_SIGN_IN",
+                    "KUBESTELLAR_CONSOLE_ALLOWED_LOGINS", "KUBESTELLAR_CONSOLE_ADMIN_LOGINS"}
     assert used <= applier_inputs()
     assert re.search(r"\[DOMAIN\]=home\.arpa", APPLIER.read_text()), "RFC 8375's home network domain"
 
@@ -156,7 +159,9 @@ def test_placeholders_are_applier_inputs_and_stay_strings() -> None:
     ("30-kubestellar-console", "kubestellar-console", "kubestellar", "kubestellar-console", 8080),
 ])
 def test_each_ui_is_routed_through_the_homelab_gateway(directory, namespace, host, service, port) -> None:
-    [route] = [d for p in (ADDONS / directory).glob("*.yaml") for d in docs(p) if d["kind"] == "HTTPRoute"]
+    # The Console's sign-in endpoints have their own route (the login gate).
+    [route] = [d for p in (ADDONS / directory).glob("*.yaml") for d in docs(p)
+               if d["kind"] == "HTTPRoute" and d["metadata"]["name"] != "kubestellar-console-login"]
     assert route["metadata"]["namespace"] == namespace
     assert route["spec"]["parentRefs"] == [{"name": "homelab", "namespace": "envoy-gateway-system"}]
     assert route["spec"]["hostnames"] == [f"{host}.${{HOMELAB_DOMAIN}}"]
@@ -230,27 +235,116 @@ def secrets(directory: str) -> list[list[str]]:
             if l.strip() and not l.startswith("#")]
 
 
-def test_console_waits_for_its_github_oauth_app() -> None:
-    # The applier skips a component whose operator files are missing: the
-    # Console is not deployed until both exist.
-    d = "/etc/bluefin/homelab.d/kubestellar-console"
-    assert secrets("30-kubestellar-console") == [
+CONSOLE = "30-kubestellar-console"
+OAUTH_FILES = "/etc/bluefin/homelab.d/kubestellar-console"
+
+
+def console_env() -> dict:
+    return {e["name"]: e for e in container(CONSOLE, "Deployment", "kubestellar-console")["env"]}
+
+
+def test_console_is_deployed_by_default_without_github_oauth() -> None:
+    # Every operator file is optional: the Console applies on a fresh node.
+    assert index(CONSOLE) == ("on", "kubeadm,k0s")
+    assert secrets(CONSOLE) == [
         ["kubestellar-console", "kubestellar-console-github-oauth",
-         f"github-client-id=@file:{d}/github-client-id", f"github-client-secret=@file:{d}/github-client-secret"],
+         f"github-client-id=@optfile:{OAUTH_FILES}/github-client-id",
+         f"github-client-secret=@optfile:{OAUTH_FILES}/github-client-secret"],
         ["kubestellar-console", "kubestellar-console-jwt", "jwt-secret=@random"],
+        ["kubestellar-console", "kubestellar-console-bootstrap", "bootstrap-token=@random"],
+        ["kubestellar-console", "kubestellar-console-login", ".htpasswd=@htpasswd:admin"],
     ]
-    console = container("30-kubestellar-console", "Deployment", "kubestellar-console")
-    env = {e["name"]: e for e in console["env"]}
-    assert env["GITHUB_CLIENT_ID"]["valueFrom"]["secretKeyRef"] == {"name": "kubestellar-console-github-oauth", "key": "github-client-id"}
-    assert env["GITHUB_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"] == {"name": "kubestellar-console-github-oauth", "key": "github-client-secret"}
+    assert not [kv for line in secrets(CONSOLE) for kv in line[2:] if "=@file:" in kv]
+    assert f'CONSOLE_OAUTH={OAUTH_FILES}\n' in APPLIER.read_text()
+    env = console_env()
+    for key in ("id", "secret"):
+        assert env[f"GITHUB_CLIENT_{key.upper()}"]["valueFrom"]["secretKeyRef"] == {
+            "name": "kubestellar-console-github-oauth", "key": f"github-client-{key}", "optional": True}
     assert env["JWT_SECRET"]["valueFrom"]["secretKeyRef"] == {"name": "kubestellar-console-jwt", "key": "jwt-secret"}
+    # The GitHub App manifest flow needs this token, and an app it stored
+    # in the database is never used.
+    assert env["CONSOLE_BOOTSTRAP_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "kubestellar-console-bootstrap", "key": "bootstrap-token"}
+    assert env["IGNORE_PERSISTED_OAUTH_CREDENTIALS"]["value"] == "true"
+    assert env["AUTH_ALLOWED_GITHUB_LOGINS"]["value"] == "${HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS}"
+    assert env["AUTH_ADMIN_GITHUB_LOGINS"]["value"] == "${HOMELAB_KUBESTELLAR_CONSOLE_ADMIN_LOGINS}"
     assert env["FRONTEND_URL"]["value"] == "http://kubestellar.${HOMELAB_DOMAIN}"
+    assert not {"DEV_MODE", "ALLOW_DEV_MODE_IN_CLUSTER", "SKIP_ONBOARDING"} & set(env)
+    deployment = find(CONSOLE, "Deployment", "kubestellar-console")
+    assert deployment["spec"]["template"]["metadata"]["annotations"] == {
+        "homelab.bluefin.dev/console-sign-in": "${HOMELAB_KUBESTELLAR_CONSOLE_SIGN_IN}"}
+    assert deployment["metadata"]["annotations"]["reloader.stakater.com/auto"] == "true"
+    console = container(CONSOLE, "Deployment", "kubestellar-console")
     assert console["image"].startswith("ghcr.io/kubestellar/console:v0.3.42@sha256:")
     # Not exposed on the node; no kiosk proxy.
-    pod = find("30-kubestellar-console", "Deployment", "kubestellar-console")["spec"]["template"]["spec"]
+    pod = deployment["spec"]["template"]["spec"]
     assert not pod.get("hostNetwork") and not [p for p in console["ports"] if "hostPort" in p]
     text = "".join(p.read_text() for p in ADDONS.glob("3*/*.yaml"))
     assert "kiosk" not in text
+
+
+def test_console_cluster_role_reads_no_secrets() -> None:
+    rules = find(CONSOLE, "ClusterRole", "kubestellar-console")["rules"]
+    assert not [r for r in rules if "secrets" in r["resources"] or "*" in r["resources"] + r["verbs"]]
+    writes = {g for r in rules for g in r["apiGroups"] if set(r["verbs"]) & {"create", "update", "patch", "delete"}}
+    assert writes <= {"authorization.k8s.io", "console.kubestellar.io"}
+
+
+GATE_PATHS = ["/auth/github", "/auth/manifest/setup", "/auth/manifest/callback"]
+
+
+def test_console_sign_in_endpoints_are_behind_the_login_password() -> None:
+    gate_docs = docs(ADDONS / CONSOLE / "11-login-gate.yaml")
+    assert [d["kind"] for d in gate_docs] == ["SecurityPolicy", "HTTPRoute"], "the policy before its route"
+    policy, gate = gate_docs
+    assert policy["apiVersion"] == "gateway.envoyproxy.io/v1alpha1"
+    assert policy["metadata"] == {"name": "kubestellar-console-login", "namespace": "kubestellar-console"}
+    assert policy["spec"] == {
+        "targetRefs": [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": "kubestellar-console-login"}],
+        "basicAuth": {"users": {"name": "kubestellar-console-login"}},
+    }
+    main = find(CONSOLE, "HTTPRoute", "kubestellar-console")
+    assert gate["metadata"] == {"name": "kubestellar-console-login", "namespace": "kubestellar-console"}
+    for key in ("parentRefs", "hostnames"):
+        assert gate["spec"][key] == main["spec"][key]
+    [rule] = gate["spec"]["rules"]
+    assert rule["backendRefs"] == main["spec"]["rules"][0]["backendRefs"]
+    exact = [m["path"]["value"] for m in rule["matches"] if m["path"]["type"] == "Exact"]
+    [regex] = [m["path"]["value"] for m in rule["matches"] if m["path"]["type"] == "RegularExpression"]
+    assert exact == GATE_PATHS and all(set(m) == {"path"} for m in rule["matches"])
+    # Envoy matches the whole path (RE2); the Console routes these the same.
+    pattern = re.compile(regex)
+    for path in [*GATE_PATHS, "/AUTH/GitHub", "/auth/github/", "//auth//github//", "/Auth/Manifest/Setup/"]:
+        assert pattern.fullmatch(path), path
+    for path in ["/", "/api/me", "/auth/github/callback", "/auth/refresh", "/auth/githubx", "/x/auth/github"]:
+        assert not pattern.fullmatch(path), path
+    # Every route the Console's backend serves for these sits in the gate.
+    assert "rules" in main["spec"] and "matches" not in main["spec"]["rules"][0]
+    # Applied after the generated login, before the Console's own route.
+    names = sorted(p.name for p in (ADDONS / CONSOLE).glob("*.yaml"))
+    assert names.index("11-login-gate.yaml") < names.index("20-httproute.yaml")
+    assert not names[0].startswith("1") and "11-login-gate.yaml" > "10"
+
+
+def test_only_the_gateway_reaches_the_console() -> None:
+    [policy] = docs(ADDONS / CONSOLE / "05-networkpolicy.yaml")
+    assert policy["kind"] == "NetworkPolicy" and policy["metadata"]["namespace"] == "kubestellar-console"
+    assert policy["spec"]["podSelector"] == {} and policy["spec"]["policyTypes"] == ["Ingress"]
+    [rule] = policy["spec"]["ingress"]
+    assert rule["ports"] == [{"port": 8080, "protocol": "TCP"}]
+    assert rule["from"] == [{
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "envoy-gateway-system"}},
+        "podSelector": {"matchLabels": {"app.kubernetes.io/component": "proxy",
+                                        "gateway.envoyproxy.io/owning-gateway-name": "homelab"}},
+    }]
+    # The Gateway's proxies run in Envoy Gateway's namespace (no
+    # GatewayNamespace mode) and the Console listens on 8080.
+    gateway = docs(HOMELAB / "manifests" / "40-envoy-gateway" / "20-gateway.yaml")
+    assert [d["metadata"]["namespace"] for d in gateway if d["kind"] == "Gateway"] == ["envoy-gateway-system"]
+    eg = (HOMELAB / "manifests" / "40-envoy-gateway" / "10-envoy-gateway.yaml").read_text()
+    assert "GatewayNamespace" not in eg
+    console = container(CONSOLE, "Deployment", "kubestellar-console")
+    assert {"name": "http", "containerPort": 8080, "protocol": "TCP"} in console["ports"]
 
 
 def test_full_kubestellar_is_opt_in_with_its_own_database() -> None:
@@ -289,6 +383,8 @@ def test_render_script_pins_every_addon_source() -> None:
         "20-mcp/20-client.yaml",
         "20-mcp/21-client-read-write.yaml",
         "20-mcp/22-httproute.yaml",
+        "30-kubestellar-console/05-networkpolicy.yaml",
+        "30-kubestellar-console/11-login-gate.yaml",
         "30-kubestellar-console/20-httproute.yaml",
         "31-kubestellar-full/20-postgres.yaml",
     }
@@ -330,7 +426,8 @@ def test_each_addon_is_a_version_locked_opt_in_sysext(name: str) -> None:
 
 def test_homelab_conf_documents_the_addon_keys() -> None:
     example = EXAMPLE.read_text()
-    for key in ("DOMAIN", "ARGO_WORKFLOWS", "MCP_READ_WRITE", "KUBESTELLAR_FULL"):
+    for key in ("DOMAIN", "ARGO_WORKFLOWS", "MCP_READ_WRITE", "KUBESTELLAR_FULL",
+                "KUBESTELLAR_CONSOLE_ALLOWED_LOGINS", "KUBESTELLAR_CONSOLE_ADMIN_LOGINS"):
         assert f"#HOMELAB_{key}=" in example, key
     assert "/etc/bluefin/homelab.d/kubestellar-console/github-client-id" in example
     assert "/etc/bluefin/homelab.d/kubestellar-console/github-client-secret" in example

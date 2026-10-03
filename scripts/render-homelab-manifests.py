@@ -368,15 +368,31 @@ ADDON_COMPONENTS = [
         release="kubestellar-console",
         values={
             "image": {"tag": "v0.3.42"},
-            # GitHub OAuth from the operator's files, the JWT key generated
-            # on the node (see the "secrets" file); no Secret in the chart.
-            "github": {"existingSecret": "kubestellar-console-github-oauth"},
+            # Secrets are generated on the node or read from the operator's
+            # files (see the "secrets" file); no Secret in the chart. Without
+            # a GitHub OAuth app (the optional Secret below) the Console's
+            # /auth/github signs in as its built-in admin; 11-login-gate.yaml
+            # puts that behind the Gateway's login password. Never DEV_MODE.
             "jwt": {"existingSecret": "kubestellar-console-jwt"},
+            "auth": {"allowedGitHubLogins": PH("KUBESTELLAR_CONSOLE_ALLOWED_LOGINS"),
+                     "adminGitHubLogins": PH("KUBESTELLAR_CONSOLE_ADMIN_LOGINS")},
+            # A switch between GitHub and password sign-in rolls the pod.
+            "podAnnotations": {"homelab.bluefin.dev/console-sign-in": PH("KUBESTELLAR_CONSOLE_SIGN_IN")},
             "persistence": {"enabled": True, "accessModes": ["ReadWriteOnce"]},
             "backup": {"enabled": False},
             "selfUpgrade": {"enabled": False},
             "rbac": {"resourceQuotasReadOnly": True},
-            "extraEnv": [{"name": "FRONTEND_URL", "value": "http://kubestellar.${HOMELAB_DOMAIN}"}],
+            "extraEnv": [
+                {"name": "FRONTEND_URL", "value": "http://kubestellar.${HOMELAB_DOMAIN}"},
+                *({"name": f"GITHUB_CLIENT_{key.upper()}", "valueFrom": {"secretKeyRef": {
+                    "name": "kubestellar-console-github-oauth", "key": f"github-client-{key}", "optional": True}}}
+                  for key in ("id", "secret")),
+                # Only the OAuth app above, never one a /auth/manifest/setup
+                # flow stored in the database; that flow needs this token.
+                {"name": "IGNORE_PERSISTED_OAUTH_CREDENTIALS", "value": "true"},
+                {"name": "CONSOLE_BOOTSTRAP_TOKEN", "valueFrom": {"secretKeyRef": {
+                    "name": "kubestellar-console-bootstrap", "key": "bootstrap-token"}}},
+            ],
         },
         root=ADDONS,
     ),
@@ -449,6 +465,10 @@ def patch_mcp(docs: list[dict]) -> list[dict]:
 
 
 def patch_console(docs: list[dict]) -> list[dict]:
+    for d in docs:
+        if d["kind"] == "Deployment":
+            # reloader restarts the pod when the operator's OAuth app changes.
+            d["metadata"].setdefault("annotations", {})["reloader.stakater.com/auto"] = "true"
     # The chart's pre-upgrade PVC migration (a Helm hook for its own
     # upgrades) has no place in a plain apply.
     return [d for d in docs if not d["metadata"]["name"].startswith("kubestellar-console-pvc-migration")]

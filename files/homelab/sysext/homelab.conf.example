@@ -28,8 +28,7 @@
 # Add-ons (their own sysexts, applied after the components when merged):
 # HOMELAB_<ID>=yes|no overrides the default in
 # /usr/share/bluefin/homelab/addons.d/<NN-id>/addon. On by default:
-# ARGO_WORKFLOWS, MCP, KUBESTELLAR_CONSOLE (deployed once its OAuth app is
-# configured, below). Off by default: KUBESTELLAR_FULL.
+# ARGO_WORKFLOWS, MCP, KUBESTELLAR_CONSOLE. Off by default: KUBESTELLAR_FULL.
 
 # MetalLB L2 address pool: free LAN addresses outside your DHCP range (ranges
 # or CIDRs, comma separated). Required for LoadBalancer Services.
@@ -85,10 +84,19 @@
 # mcp-client gets the "edit" ClusterRole.
 #HOMELAB_MCP_READ_WRITE=yes
 
-# KubeStellar Console (kubestellar sysext): deployed once a GitHub OAuth app
-# (callback http://kubestellar.<domain>/auth/github/callback) is configured:
-# its client id and secret, each without a trailing newline, in
+# KubeStellar Console (kubestellar sysext) at http://kubestellar.<domain>:
+# its sign-in asks for the login password (user admin; shown on the
+# console, or `kubectl -n kubestellar-console get secret
+# kubestellar-console-login -o jsonpath='{.data.password}' | base64 -d`),
+# then signs in as the Console's built-in admin. GitHub sign-in instead (the
+# password prompt stays in front of it): a GitHub OAuth app (callback
+# http://kubestellar.<domain>/auth/github/callback) with its client id and
+# secret, each without a trailing newline, in
 # /etc/bluefin/homelab.d/kubestellar-console/github-client-id and
-# /etc/bluefin/homelab.d/kubestellar-console/github-client-secret (mode 0600).
+# /etc/bluefin/homelab.d/kubestellar-console/github-client-secret (mode
+# 0600), and the GitHub logins allowed to sign in (any GitHub account
+# without; comma separated) and those made admins:
+#HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS=you,friend
+#HOMELAB_KUBESTELLAR_CONSOLE_ADMIN_LOGINS=you
 # Full KubeStellar (KubeFlex, Postgres, the KubeStellar controllers):
 #HOMELAB_KUBESTELLAR_FULL=yes

@@ -1,7 +1,7 @@
 kind: manual
 description: |
-  Opt-in homelab add-on systemd-sysext: the KubeStellar Console (deployed
-  once its GitHub OAuth app is configured, behind the homelab Gateway) and,
+  Opt-in homelab add-on systemd-sysext: the KubeStellar Console (behind the
+  homelab Gateway, its sign-in behind a generated login password) and,
   with HOMELAB_KUBESTELLAR_FULL=yes, full KubeStellar (KubeFlex, its
   Postgres, the KubeStellar controllers' PostCreateHooks), under
   /usr/share/bluefin/homelab/addons.d/. Needs the homelab sysext, whose

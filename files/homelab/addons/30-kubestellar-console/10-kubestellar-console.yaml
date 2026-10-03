@@ -285,6 +285,8 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     owner: kubestellar
   namespace: kubestellar-console
+  annotations:
+    reloader.stakater.com/auto: 'true'
 spec:
   replicas: 1
   progressDeadlineSeconds: 900
@@ -296,6 +298,8 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        homelab.bluefin.dev/console-sign-in: "${HOMELAB_KUBESTELLAR_CONSOLE_SIGN_IN}"
       labels:
         helm.sh/chart: kubestellar-console-0.3.42
         app.kubernetes.io/name: kubestellar-console
@@ -368,16 +372,10 @@ spec:
           value: /usr/local/bin/kubestellar-ops
         - name: KUBESTELLAR_DEPLOY_PATH
           value: /usr/local/bin/kubestellar-deploy
-        - name: GITHUB_CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: kubestellar-console-github-oauth
-              key: github-client-id
-        - name: GITHUB_CLIENT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: kubestellar-console-github-oauth
-              key: github-client-secret
+        - name: AUTH_ALLOWED_GITHUB_LOGINS
+          value: "${HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS}"
+        - name: AUTH_ADMIN_GITHUB_LOGINS
+          value: "${HOMELAB_KUBESTELLAR_CONSOLE_ADMIN_LOGINS}"
         - name: JWT_SECRET
           valueFrom:
             secretKeyRef:
@@ -403,6 +401,25 @@ spec:
           value: '95'
         - name: FRONTEND_URL
           value: "http://kubestellar.${HOMELAB_DOMAIN}"
+        - name: GITHUB_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              key: github-client-id
+              name: kubestellar-console-github-oauth
+              optional: true
+        - name: GITHUB_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              key: github-client-secret
+              name: kubestellar-console-github-oauth
+              optional: true
+        - name: IGNORE_PERSISTED_OAUTH_CREDENTIALS
+          value: 'true'
+        - name: CONSOLE_BOOTSTRAP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: bootstrap-token
+              name: kubestellar-console-bootstrap
         volumeMounts:
         - name: kc-config
           mountPath: /app/.kc

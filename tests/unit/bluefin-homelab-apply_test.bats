@@ -19,7 +19,7 @@ setup() {
     # (CI runners ship a real kubectl in /usr/local/bin).
     TOOLS="${BATS_TEST_TMPDIR}/tools"
     mkdir -p "${TOOLS}"
-    for t in awk basename bash cat chmod cp env grep head id ln mkdir mktemp mv od printf rm sed sleep sort tail timeout touch tr; do
+    for t in awk base64 basename bash cat chmod cp env grep head id ln mkdir mktemp mv od printf rm sed sha1sum sleep sort tail timeout touch tr; do
         p=$(command -v "$t") && ln -sf "$p" "${TOOLS}/$t"
     done
     : >"${LOG}"
@@ -40,6 +40,7 @@ case \${args} in
     c=\$(cat "${BATS_TEST_TMPDIR}/waits" 2>/dev/null || echo 0)
     echo \$((c + 1)) >"${BATS_TEST_TMPDIR}/waits"
     [ "\${c}" -ge "\${WAIT_FAILS:-0}" ]; exit \$? ;;
+*" get secret "*"jsonpath={.data.password}"*) printf %s "\${LOGIN_PASSWORD:-}" | base64; exit 0 ;;
 *" get secret "*) exit \${SECRET_RC:-1} ;;
 *" create secret "*) printf 'kind: Secret\n' ; exit 0 ;;
 *" get -f "*)
@@ -339,26 +340,88 @@ with_addons() {
     [[ "$(applied_components)" == *"kured other" ]]
 }
 
-@test "the KubeStellar Console is not deployed until its OAuth app is configured" {
+console_issue() {
+    echo "${FAKE_ROOT}/run/issue.d/51-kubestellar-console.issue"
+}
+
+@test "KubeStellar Console: deployed without OAuth, its sign-in behind a generated login" {
     kubeadm_node
     with_addons
-    run_applier
-    [[ "$output" == *"kubestellar-console: skipped, missing /etc/bluefin/homelab.d/kubestellar-console/github-client-id /etc/bluefin/homelab.d/kubestellar-console/github-client-secret"* ]]
-    ! ls "${APPLIED}"/*-10-kubestellar-console.yaml
+    run_applier LOGIN_PASSWORD=0123456789abcdef0123456789abcdef
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kubestellar-console: ready"* ]]
+    # The NetworkPolicy before the Console runs, the gate before its route.
+    order=$(ls "${APPLIED}" | sed -n 's/^[0-9]*-\(05-networkpolicy\|10-kubestellar-console\|11-login-gate\|20-httproute\)\.yaml$/\1/p' | paste -sd' ')
+    [[ "${order}" == *"05-networkpolicy 10-kubestellar-console 11-login-gate 20-httproute" ]]
+    console=$(ls "${APPLIED}"/*-10-kubestellar-console.yaml)
+    grep -q 'homelab.bluefin.dev/console-sign-in: "password"' "${console}"
+    grep -A1 'name: AUTH_ALLOWED_GITHUB_LOGINS' "${console}" | grep -q 'value: ""'
+    grep -q 'value: "http://kubestellar.home.arpa"' "${console}"
+    ! grep -q 'HOMELAB_' "${console}"
+    grep -q '"kubestellar.home.arpa"' "${APPLIED}"/*-11-login-gate.yaml
+    ! grep -q 'create secret generic kubestellar-console-github-oauth' "${LOG}"
+    [[ "$(grep 'create secret generic kubestellar-console-bootstrap' "${LOG}")" =~ --from-literal=bootstrap-token=[0-9a-f]{48} ]]
+    line=$(grep 'create secret generic kubestellar-console-login' "${LOG}")
+    [[ "${line}" =~ --from-literal=\.htpasswd=admin:\{SHA\}([A-Za-z0-9+/]{27}=)\ --from-literal=password=([0-9a-f]{32})\  ]]
+    hash=${BASH_REMATCH[1]} password=${BASH_REMATCH[2]}
+    # Envoy's {SHA}: base64 of the binary SHA-1 of the password.
+    [ "$(printf %s "${hash}" | base64 -d | od -An -tx1 | tr -d ' \n')" = "$(printf %s "${password}" | sha1sum | sed 's/ .*//')" ]
+    [[ "$output" != *"${password}"* ]] && [[ "$output" != *"${hash}"* ]]
+    for secret in jwt-secret bootstrap-token; do
+        value=$(grep -o -- "--from-literal=${secret}=[0-9a-f]*" "${LOG}" | cut -d= -f3)
+        [[ "$output" != *"${value}"* ]]
+    done
+    # The login on the local consoles (like the join passphrase), not the journal.
+    [ "$(stat -c %a "$(console_issue)")" = 600 ]
+    grep -qx 'KubeStellar Console: http://kubestellar.home.arpa (user admin, password 0123456789abcdef0123456789abcdef)' "$(console_issue)"
+    grep -q "get secret kubestellar-console-login -o jsonpath='{.data.password}' | base64 -d" "$(console_issue)"
+    [[ "$output" != *0123456789abcdef0123456789abcdef* ]]
+    [[ "$output" != *"without HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS"* ]]
+}
+
+@test "KubeStellar Console: the generated Secrets are never rotated" {
+    kubeadm_node
+    with_addons
+    run_applier SECRET_RC=0
+    [ "$status" -eq 0 ]
+    ! grep -q 'create secret generic kubestellar-console' "${LOG}"
+}
+
+@test "KubeStellar Console: GitHub sign-in once its OAuth app files exist" {
+    kubeadm_node
+    with_addons
     d="${FAKE_ROOT}/etc/bluefin/homelab.d/kubestellar-console"
     mkdir -p "${d}"
     printf %s dummy-id >"${d}/github-client-id"
-    printf %s dummy-secret >"${d}/github-client-secret"
-    : >"${LOG}"
     run_applier
     [ "$status" -eq 0 ]
-    ls "${APPLIED}"/*-10-kubestellar-console.yaml
+    ! grep -q 'create secret generic kubestellar-console-github-oauth' "${LOG}"
+    grep -q 'console-sign-in: "password"' "${APPLIED}"/*-10-kubestellar-console.yaml
+    printf %s dummy-secret >"${d}/github-client-secret"
+    rm -f "${APPLIED}"/*
+    : >"${LOG}"
+    run_applier SECRET_RC=0
+    [ "$status" -eq 0 ]
     grep -q "create secret generic kubestellar-console-github-oauth --from-file=github-client-id=${d}/github-client-id --from-file=github-client-secret=${d}/github-client-secret" "${LOG}"
-    line=$(grep 'create secret generic kubestellar-console-jwt' "${LOG}")
-    [[ "${line}" =~ --from-literal=jwt-secret=([0-9a-f]{48}) ]]
-    [[ "$output" != *"${BASH_REMATCH[1]}"* ]]
+    grep -q 'console-sign-in: "github"' "${APPLIED}"/*-10-kubestellar-console.yaml
+    # The login password still guards the start of GitHub's sign-in.
+    ls "${APPLIED}"/*-11-login-gate.yaml
+    [[ "$output" == *"<4>kubestellar-console: GitHub sign-in without HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS"* ]]
     [[ "$output" != *dummy-secret* ]]
-    grep -q 'value: "http://kubestellar.home.arpa"' "${APPLIED}"/*-10-kubestellar-console.yaml
+    rm -f "${APPLIED}"/*
+    run_applier SECRET_RC=0 HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS=alice,bob-2 HOMELAB_KUBESTELLAR_CONSOLE_ADMIN_LOGINS=alice
+    [[ "$output" != *"without HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS"* ]]
+    grep -A1 'name: AUTH_ALLOWED_GITHUB_LOGINS' "${APPLIED}"/*-10-kubestellar-console.yaml | grep -q 'value: "alice,bob-2"'
+    grep -A1 'name: AUTH_ADMIN_GITHUB_LOGINS' "${APPLIED}"/*-10-kubestellar-console.yaml | grep -q 'value: "alice"'
+}
+
+@test "KubeStellar Console: an invalid login list holds the Console back" {
+    kubeadm_node
+    with_addons
+    run_applier 'HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS=alice;rm'
+    [[ "$output" == *"ignoring HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS=alice;rm"* ]]
+    [[ "$output" == *"kubestellar-console: skipping 10-kubestellar-console.yaml: HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS not set"* ]]
+    ! ls "${APPLIED}"/*-10-kubestellar-console.yaml
 }
 
 @test "MCP: read-only by default, read-write only with HOMELAB_MCP_READ_WRITE=yes" {

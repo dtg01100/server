@@ -97,8 +97,57 @@ HTTP on port 80 of its MetalLB address) by host name under
 |---|---|---|
 | `10-argo-workflows` (`argo-workflows`) | on | Argo Workflows v4.1.4, namespace-scoped install in `argo`; the server runs `--auth-mode=client --secure=false`: every API call carries a Kubernetes token, e.g. `kubectl -n argo create token argo-server` (bind a Role for your own account). |
 | `20-mcp` (`mcp`) | on | [kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server) v0.0.67, Streamable HTTP at `http://mcp.<domain>/mcp`. Read-only (`read_only = true`, Secrets denied); `require_oauth` with token passthrough: a request without a bearer token gets 401, and the API server authenticates and authorizes every tool call. The client token is Kubernetes-generated, never logged: `kubectl -n mcp get secret mcp-client-token -o jsonpath='{.data.token}' \| base64 -d` (`mcp-client`, ClusterRole `view`). `HOMELAB_MCP_READ_WRITE=yes` turns the write tools on and binds `edit`; switching back hides the tools, and the binding stays until you delete `clusterrolebinding/mcp-client-edit`. |
-| `30-kubestellar-console` (`kubestellar`) | on | KubeStellar Console v0.3.42, GitHub sign-in only. Not deployed until a GitHub OAuth app (callback `http://kubestellar.<domain>/auth/github/callback`) is configured: its client id and secret in `/etc/bluefin/homelab.d/kubestellar-console/github-client-id` and `github-client-secret` (no trailing newline, mode 0600); the JWT key is generated on the node. |
+| `30-kubestellar-console` (`kubestellar`) | on | KubeStellar Console v0.3.42, deployed as is: see "KubeStellar Console sign-in" below. |
 | `31-kubestellar-full` (`kubestellar`) | off | `HOMELAB_KUBESTELLAR_FULL=yes`: KubeStellar core chart 0.30.0 (KubeFlex and the PostCreateHooks that install the KubeStellar controllers into the ITS/WDS control planes you create), with a pinned Postgres in place of KubeFlex's runtime Helm install. Not covered by the QEMU check. |
+
+**KubeStellar Console sign-in.** Without a GitHub OAuth app, the Console's
+`GET /auth/github` signs in as its built-in admin (`dev-user`; upstream
+kubestellar/console#20823) and sets the `kc_auth` session cookie (a JWT
+signed with the generated `kubestellar-console-jwt` key) that every other
+request needs; its in-cluster front end goes there by itself. `DEV_MODE` is
+never set. `11-login-gate.yaml` is a second HTTPRoute for the same host that
+takes `/auth/github`, `/auth/manifest/setup` and `/auth/manifest/callback`
+(Exact matches, which outrank the Console route's `/` prefix, plus a
+case-insensitive regular expression for the spellings the Console's router
+also accepts) with an Envoy Gateway `SecurityPolicy` that adds HTTP basic
+auth: the browser asks for user `admin` and the password the applier
+generated (`@htpasswd:admin` in `secrets`: Secret `kubestellar-console-login`,
+the `{SHA}` htpasswd line in `.htpasswd`, the password in `password`; made
+once, never rotated, never logged). The control plane shows the address and
+login next to the join passphrase, the same way
+(`/run/issue.d/51-kubestellar-console.issue`, 0600); elsewhere: `kubectl -n
+kubestellar-console get secret kubestellar-console-login -o
+jsonpath='{.data.password}' | base64 -d`. The GitHub App manifest flow also
+needs the generated `CONSOLE_BOOTSTRAP_TOKEN`, and
+`IGNORE_PERSISTED_OAUTH_CREDENTIALS=true` ignores any app it stored. A
+NetworkPolicy lets only the homelab Gateway's Envoy proxies (namespace
+`envoy-gateway-system`) reach the Console's pods, so nothing in the cluster
+gets around the gate through its Service; Cilium (kubeadm) and kube-router
+(k0s, which runs it with `--run-firewall`) enforce it, another CNI might not.
+
+GitHub sign-in instead: a GitHub OAuth app (callback
+`http://kubestellar.<domain>/auth/github/callback`) with its client id and
+secret in `/etc/bluefin/homelab.d/kubestellar-console/github-client-id` and
+`github-client-secret` (no trailing newline, mode 0600). The next applier
+run makes the Secret `kubestellar-console-github-oauth` and rolls the Console
+(pod annotation `homelab.bluefin.dev/console-sign-in`). Limit it with
+`HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS` (comma separated; without it
+any GitHub account can sign in, and the applier warns) and name admins with
+`HOMELAB_KUBESTELLAR_CONSOLE_ADMIN_LOGINS`. The login password stays in
+front of `/auth/github`. Back to password sign-in: remove both files and
+`kubectl -n kubestellar-console delete secret
+kubestellar-console-github-oauth` (the applier never deletes).
+
+Mind that:
+- everyone with the password is the same admin (`dev-user`): no personal
+  identity or audit trail; GitHub sign-in gives one;
+- the Gateway speaks plain HTTP: the password and the session cookie cross
+  the LAN in cleartext;
+- signing out ends the Console session, but the browser keeps the basic-auth
+  login until it is closed, so signing in again does not ask for it;
+- the gate covers the session-creating endpoints of Console v0.3.42 (its
+  `/auth/*` routes, checked against its source): check them again, and run
+  `just dogfood-homelab-templates`, when bumping the Console.
 
 The `kubestellar` sysext used to be a k0s-only appliance (Argo CD,
 KubeStellar and a loopback kiosk seeded into `/var/lib/k0s/manifests`).
@@ -141,7 +190,8 @@ exception, created once and yours to edit afterwards on an installed node.
 **Access.** No identity layer: `ssh root@<node>` with your key; `kubectl` as
 root uses kubeadm's `/etc/kubernetes/admin.conf` (k0s:
 `/var/lib/k0s/pki/admin.conf`); Argo CD's built-in `admin` with the
-password in `argocd-initial-admin-secret`.
+password in `argocd-initial-admin-secret`; the KubeStellar Console's
+`admin` login (above).
 
 **k0s** is the alternative (the add-ons work the same on it): the two k0s templates, not offered by the USB
 installer, which installs kubeadm only.
@@ -159,7 +209,11 @@ installer, which installs kubeadm only.
   without a pool), a local-path PVC bound, both nodes Ready; the add-ons:
   Argo Workflows answers 401 without a token and accepts a `kubectl create
   token` one, the MCP server answers 401 without a token, reads with the
-  `mcp-client` token and refuses a write tool, and the Console is absent
-  until dummy OAuth files are added, then deployed. Needs guest internet.
+  `mcp-client` token and refuses a write tool; the Console is deployed
+  without OAuth, `/auth/github` through the Gateway answers 401 without
+  the login (and in another spelling) and, with the generated one, redirects
+  with a `kc_auth` cookie that `/api/me` accepts as the admin; a pod in
+  another namespace cannot reach the Console's Service (NetworkPolicy), and
+  the login is on the console, not in the journal. Needs guest internet.
 - `just dogfood-homelab-installer`: the same from the USB installer's Homelab
   entries, offline installs ([usb-installer.md](usb-installer.md)).

@@ -1,5 +1,5 @@
-# The KubeStellar Console on the homelab Gateway at kubestellar.<HOMELAB_DOMAIN>
-# (sign-in with GitHub OAuth only).
+# The KubeStellar Console on the homelab Gateway at kubestellar.<HOMELAB_DOMAIN>;
+# its sign-in endpoints take the route in 11-login-gate.yaml.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
