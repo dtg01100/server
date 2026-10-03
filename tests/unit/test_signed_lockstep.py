@@ -42,7 +42,33 @@ def test_keyring_updates_with_usr_and_replaces_fsdk_vendor_key() -> None:
     assert "freedesktop-sdk.bst:components/gnupg.bst" in INITRD.read_text()
 
 
-def _feature_transfer_pairs() -> list[tuple[str, str]]:
+def _feature_names() -> list[str]:
+    """Return the stem of every ``*.feature`` file, failing loudly if none exist.
+
+    An empty or missing ``sysupdate.d`` would otherwise collapse every
+    parametrized test below into a silent skip.
+    """
+    names = sorted(p.stem for p in SYSUPDATE.glob("*.feature"))
+    if not names:
+        raise AssertionError(f"no *.feature files found under {SYSUPDATE}")
+    return names
+
+
+def _transfers_by_feature() -> dict[str, list[str]]:
+    """Map each feature named in a ``[Transfer] Features=`` key to its transfers.
+
+    ``Features=`` is a whitespace-separated list (systemd-sysupdate and
+    ``bluefin-sysext-fetch`` both split it), so one transfer may serve
+    several features.
+    """
+    by_feature: dict[str, list[str]] = {}
+    for path in sorted(SYSUPDATE.glob("*.transfer")):
+        for feature in ini(path)["Transfer"].get("Features", "").split():
+            by_feature.setdefault(feature, []).append(path.name)
+    return by_feature
+
+
+def _feature_transfer_pairs() -> list[tuple[str, str | None]]:
     """Return ``(name, transfer_filename)`` for every optional sysupdate feature.
 
     ``updatectl features`` (and the D-Bus ``org.freedesktop.sysupdate1``
@@ -50,21 +76,20 @@ def _feature_transfer_pairs() -> list[tuple[str, str]]:
     transfers each one enables from the ``Features=`` key inside
     ``[Transfer]``. Drift between the two sides silently breaks
     ``updatectl enable <feature>`` and the boot-time feature fetch, so the
-    pair list is derived from disk rather than maintained by hand.
+    pair list is derived from disk rather than maintained by hand. A feature
+    with no transfer is paired with ``None`` so the test fails for it.
     """
-    names = sorted(p.stem for p in SYSUPDATE.glob("*.feature"))
-    pairs: dict[str, str] = {}
-    for path in sorted(SYSUPDATE.glob("*.transfer")):
-        transfer = ini(path)
-        feature = transfer["Transfer"].get("Features", "").strip()
-        if not feature:
-            continue
-        pairs[feature] = path.name
-    return [(name, pairs[name]) for name in names if name in pairs]
+    by_feature = _transfers_by_feature()
+    return [
+        (name, transfer)
+        for name in _feature_names()
+        for transfer in by_feature.get(name) or [None]
+    ]
 
 
 @pytest.mark.parametrize("name,transfer", _feature_transfer_pairs())
-def test_version_locked_sysexts_are_optional_features(name: str, transfer: str) -> None:
+def test_version_locked_sysexts_are_optional_features(name: str, transfer: str | None) -> None:
+    assert transfer is not None, f"{name}.feature has no transfer naming it in Features="
     feature = ini(SYSUPDATE / f"{name}.feature")["Feature"]
     assert feature.get("Enabled", "false").lower() in {"", "false", "no", "0"}, (
         f"{name}.feature carries Enabled={feature.get('Enabled')!r}; "
@@ -72,13 +97,13 @@ def test_version_locked_sysexts_are_optional_features(name: str, transfer: str) 
         "Ignition templates can flip them on per node"
     )
     t = ini(SYSUPDATE / transfer)
-    assert t["Transfer"]["Features"] == name
+    assert name in t["Transfer"]["Features"].split()
     assert t["Transfer"]["ProtectVersion"] == "%A"
     assert t["Target"]["Path"] == "/var/lib/extensions"
     assert t["Target"]["MatchPattern"] == f"{name}_@v.raw"
 
 
-@pytest.mark.parametrize("name", [p.stem for p in sorted(SYSUPDATE.glob("*.feature"))])
+@pytest.mark.parametrize("name", _feature_names())
 def test_sysupdate_feature_definition_parses(name: str) -> None:
     """Every ``*.feature`` file must parse as a valid ``[Feature]`` section.
 
@@ -109,6 +134,9 @@ def test_sysupdate_feature_definition_parses(name: str) -> None:
 def test_no_sysupdate_feature_or_transfer_is_orphaned() -> None:
     """Each ``*.feature`` file pairs with exactly one ``*.transfer``.
 
+    systemd-sysupdate itself allows several transfers per feature; the
+    one-transfer rule is this repo's convention (one sysext per feature).
+
     ``updatectl features`` reads feature definitions; ``systemd-sysupdate
     update`` looks up the transfer that installs each enabled feature's
     sysext. Either side missing its counterpart leaves the feature silent:
@@ -116,14 +144,8 @@ def test_no_sysupdate_feature_or_transfer_is_orphaned() -> None:
     that names a feature that doesn't exist errors out with
     "Optional feature not found".
     """
-    features = {p.stem for p in SYSUPDATE.glob("*.feature")}
-    transfers_by_feature: dict[str, list[str]] = {}
-    for path in sorted(SYSUPDATE.glob("*.transfer")):
-        transfer = ini(path)
-        feature = transfer["Transfer"].get("Features", "").strip()
-        if not feature:
-            continue
-        transfers_by_feature.setdefault(feature, []).append(path.name)
+    features = set(_feature_names())
+    transfers_by_feature = _transfers_by_feature()
 
     referenced = set(transfers_by_feature)
     assert features == referenced, (
@@ -134,12 +156,12 @@ def test_no_sysupdate_feature_or_transfer_is_orphaned() -> None:
 
     duplicates = {name: names for name, names in transfers_by_feature.items() if len(names) > 1}
     assert not duplicates, (
-        f"each feature has exactly one transfer; duplicates would let "
-        f"updatectl enable match the wrong one: {duplicates}"
+        f"repo convention: each feature ships exactly one sysext transfer "
+        f"(MatchPattern <feature>_@v.raw); found several for {duplicates}"
     )
 
 
-@pytest.mark.parametrize("element,name", [("zfs-sysext.bst", "zfs"), ("kubestellar-sysext.bst", "kubestellar"), ("kubeadm-sysext.bst", "kubeadm"), ("homelab-sysext.bst", "homelab"), ("argo-workflows-sysext.bst", "argo-workflows"), ("mcp-sysext.bst", "mcp"), ("nvidia-open-595-sysext.bst", "nvidia-open-595")])
+@pytest.mark.parametrize("element,name", [(f"{name}-sysext.bst", name) for name in _feature_names()])
 def test_extension_release_name_carries_the_image_version(element: str, name: str) -> None:
     text = (ROOT / "elements" / "oci" / element).read_text(encoding="utf-8")
     assert f'sysext-release: "{name}_%{{image-version}}"' in text
