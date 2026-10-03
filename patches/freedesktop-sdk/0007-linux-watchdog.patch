@@ -1,0 +1,22 @@
+diff --git a/files/linux/fdsdk-config.sh b/files/linux/fdsdk-config.sh
+--- a/files/linux/fdsdk-config.sh
++++ b/files/linux/fdsdk-config.sh
+@@ -2810,3 +2810,17 @@
+ if has HAVE_ARCH_TRANSPARENT_HUGEPAGE; then
+     enable TRANSPARENT_HUGEPAGE
+ fi
++
++# Bluefin Server: enable hardware watchdog support so systemd's
++# RuntimeWatchdogSec= / RebootWatchdogSec= / ShutdownWatchdogSec= can bind
++# to /dev/watchdog (watchdog core), and the common x86 server / BMC / SIO
++# watchdog drivers are modules so an operator can `modprobe` the one that
++# matches the platform without rebuilding the kernel.
++enable WATCHDOG
++enable WATCHDOG_CORE
++module I6300ESB_WDT
++module ITCO_WDT
++module SP5100_TCO
++module IT87_WDT
++module NUVOTON_NCT6775_WDT
++module SOFT_WATCHDOG
++module IPMI_WATCHDOG
