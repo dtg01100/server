@@ -155,7 +155,7 @@ def test_placeholders_are_applier_inputs_and_stay_strings() -> None:
 
 HSTS = [
     {"type": "ResponseHeaderModifier",
-     "responseHeaderModifier": {"add": [
+     "responseHeaderModifier": {"set": [
          {"name": "Strict-Transport-Security",
           "value": "max-age=63072000; includeSubDomains"}]}}]
 

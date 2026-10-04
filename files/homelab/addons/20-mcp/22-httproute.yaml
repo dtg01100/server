@@ -1,9 +1,12 @@
 # The MCP endpoint (Streamable HTTP, http://mcp.<HOMELAB_DOMAIN>/mcp) on the
 # homelab Gateway. Requests without a bearer token get 401.
-# The ResponseHeaderModifier filter adds Strict-Transport-Security so a
-# browser or MCP client that has already reached mcp.<domain> over HTTPS
-# remembers to upgrade future requests before any bearer token is sent
-# (issue #389).
+# The ResponseHeaderModifier filter sets Strict-Transport-Security so a
+# browser that has already reached mcp.<domain> over HTTPS remembers to
+# upgrade future requests before any bearer token is sent (issue #389).
+# Non-browser MCP clients do not implement HSTS; the filter only helps
+# someone opening the endpoint in a browser. Envoy Gateway emits the header
+# regardless of listener, so on the plain :80 listener a UA is still
+# expected to ignore HSTS per RFC 6797 §8.1; browsers do.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -22,6 +25,6 @@ spec:
     filters:
     - type: ResponseHeaderModifier
       responseHeaderModifier:
-        add:
+        set:
         - name: Strict-Transport-Security
           value: "max-age=63072000; includeSubDomains"

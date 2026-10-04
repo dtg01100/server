@@ -1,6 +1,6 @@
 # The KubeStellar Console on the homelab Gateway at kubestellar.<HOMELAB_DOMAIN>;
 # its sign-in endpoints take the route in 11-login-gate.yaml.
-# The ResponseHeaderModifier filter adds Strict-Transport-Security so a
+# The ResponseHeaderModifier filter sets Strict-Transport-Security so a
 # browser that has already reached kubestellar.<domain> over HTTPS remembers
 # to upgrade future requests before the basic-auth password or the kc_auth
 # session cookie is sent (issue #389).
@@ -22,6 +22,6 @@ spec:
     filters:
     - type: ResponseHeaderModifier
       responseHeaderModifier:
-        add:
+        set:
         - name: Strict-Transport-Security
           value: "max-age=63072000; includeSubDomains"

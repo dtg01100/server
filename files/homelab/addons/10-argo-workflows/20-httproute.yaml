@@ -1,9 +1,12 @@
 # The Argo Workflows UI and API on the homelab Gateway at
 # argo.<HOMELAB_DOMAIN>. The server runs with --auth-mode=client: every
 # request needs a Kubernetes bearer token (kubectl create token).
-# The ResponseHeaderModifier filter adds Strict-Transport-Security so a
+# The ResponseHeaderModifier filter sets Strict-Transport-Security so a
 # browser that has already reached argo.<domain> over HTTPS remembers to
 # upgrade future requests before any credential is sent (issue #389).
+# Envoy Gateway emits the header on every response regardless of listener,
+# so on the plain :80 listener a UA is still expected to ignore HSTS per
+# RFC 6797 §8.1; browsers do.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -22,6 +25,6 @@ spec:
     filters:
     - type: ResponseHeaderModifier
       responseHeaderModifier:
-        add:
+        set:
         - name: Strict-Transport-Security
           value: "max-age=63072000; includeSubDomains"
