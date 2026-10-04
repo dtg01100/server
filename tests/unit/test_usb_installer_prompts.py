@@ -2,9 +2,11 @@
 
 Every question the installer used to ask on real hardware is answered ahead of
 time, and the "Press any key to proceed" hang after a successful install is
-gone. The settings that do that live in three files, so they are pinned here:
-the sysinstall drop-in, the installer kernel command line, and the dogfood
-script that replays the same ExecStart= unattended.
+gone: a good install shows "installed, remove the stick" and restarts by
+itself. The settings that do that live in a few files, so they are pinned
+here: the sysinstall drop-in, the installer kernel command line, the
+installed disk's root password prompt, and the dogfood script that replays
+the same ExecStart= unattended.
 """
 
 from __future__ import annotations
@@ -55,10 +57,19 @@ def test_sysinstall_does_not_reboot_itself_so_no_key_press_is_awaited():
     assert option(install_argv(), "--reboot") == "no"
 
 
+DONE_UNIT = ROOT / "files" / "os" / "creds" / "systemd" / "system" / "bluefin-installer-done.service"
+
+
 def test_the_service_manager_reboots_when_the_install_succeeds():
     unit = SystemdFile(DROPIN)
-    assert unit.value("Unit", "SuccessAction") == "reboot"
-    # SuccessAction= only fires when the unit goes inactive. From systemd v262
+    # A good install starts the "installed, remove the stick" screen, which
+    # restarts the machine when it ends, however it ends.
+    assert unit.words("Unit", "OnSuccess") == ["bluefin-installer-done.service"]
+    assert unit.value("Unit", "SuccessAction") is None
+    done = SystemdFile(DONE_UNIT)
+    assert done.value("Unit", "SuccessAction") == "reboot"
+    assert done.value("Unit", "FailureAction") == "reboot"
+    # OnSuccess= only fires when the unit goes inactive. From systemd v262
     # upstream's unit is Type=oneshot with RemainAfterExit=yes, which would
     # leave it "active (exited)" after a good install and never reboot.
     assert unit.value("Service", "RemainAfterExit") == "no"
@@ -91,6 +102,7 @@ PROMPT_UNIT = (
     ROOT / "files" / "os" / "creds" / "systemd" / "system" / "bluefin-root-password-prompt.service"
 )
 PRESETS = ROOT / "files" / "os" / "systemd" / "system-preset"
+PROMPT_HELPER = ROOT / "files" / "os" / "libexec" / "bluefin-root-password-prompt"
 
 
 def test_the_installed_disk_asks_for_a_root_password_on_first_boot():
@@ -102,8 +114,12 @@ def test_the_installed_disk_asks_for_a_root_password_on_first_boot():
     unit = SystemdFile(PROMPT_UNIT)
     assert unit.value("Unit", "ConditionCredential") == name
     assert unit.value("Unit", "ConditionFirstBoot") == "yes"
-    [argv] = unit.commands()
-    assert argv[0] == "systemd-firstboot" and "--prompt-root-password" in argv
+    # Stock systemd-firstboot asks, through a helper that asks again while
+    # root has no password (bluefin-root-password-prompt_test.bats).
+    assert unit.commands() == [["/usr/libexec/bluefin-root-password-prompt"]]
+    helper = PROMPT_HELPER.read_text(encoding="utf-8")
+    assert 'firstboot="${BLUEFIN_FIRSTBOOT:-systemd-firstboot}"' in helper
+    assert "--prompt-root-password" in helper
     assert preset("bluefin-root-password-prompt.service", PRESETS.glob("*.preset")) == "enable"
 
 

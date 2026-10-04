@@ -453,6 +453,16 @@ jobs:
           DOGFOOD_STATE: dist/dogfood-installer-foreign-gpt
         run: bash scripts/dogfood-installer.sh dist/diskless
 
+      # The supervised console path (#311), typed on the guest keyboard: the
+      # disk picked by number from a list with size and model, the
+      # "installed" screen, then the root password and a login at tty1, with
+      # the hostname and IP address on the login banner.
+      - name: Install from the USB installer at the console and log in
+        env:
+          DOGFOOD_INSTALL: console
+          DOGFOOD_STATE: dist/dogfood-installer-console
+        run: bash scripts/dogfood-installer.sh dist/diskless
+
       # Without Secure Boot (#309) an unattended install is refused before any
       # disk write, and installs only with bluefin.install-allow-insecure-boot.
       - name: Refuse to install from the USB installer without Secure Boot

@@ -4,7 +4,7 @@ description: The offline USB installer bluefin-server-installer_<ver>.raw. Load 
 metadata:
   type: reference
   status: stable
-  last_updated: "2026-10-03"
+  last_updated: "2026-10-04"
   context7-sources:
     - /systemd/systemd
 ---
@@ -57,7 +57,9 @@ not warn about executable definition files). The
 `--definitions=/run/bluefin/installer/bluefin/repart.d` and
 `--kernel=${BLUEFIN_INSTALL_KERNEL}` (the disk UKI, named by the installer
 UKI's `systemd.setenv=`), `--erase=yes`, and `--reboot=no` with
-`SuccessAction=reboot`, plus `RemainAfterExit=no` so that still fires once
+`OnSuccess=bluefin-installer-done.service` (the "installed" screen, which
+restarts the machine: its `SuccessAction=reboot` and `FailureAction=reboot`),
+plus `RemainAfterExit=no` so that still fires once
 upstream's unit is `Type=oneshot` with `RemainAfterExit=yes` (systemd v262).
 It also sets `FailureAction=none` and leaves out upstream's
 `--mute-console=yes`; what that changes is described after the install steps
@@ -68,54 +70,84 @@ never offers it there.
 
 This is stock `systemd-sysinstall` (systemd-sysinstall(8)); Bluefin adds no
 installer UI of its own, apart from the Secure Boot check
-([Secure Boot](#secure-boot)) and the Homelab entries' one prompt
-([Homelab entries](#homelab-entries)).
+([Secure Boot](#secure-boot)), the Homelab entries' one prompt
+([Homelab entries](#homelab-entries)), the target-disk question and the
+"installed" screen. Each is a small unit on the monitor, ordered around
+sysinstall, with a helper in `/usr/libexec`.
 
 1. Boot the stick. systemd-boot offers **Bluefin Server <ver>** (the
    default, booted after 3 seconds), **Bluefin Server <ver> (Homelab:
    control plane)** and **(Homelab: node)**; the steps below are the
    default's. The installer UKI sets the `firstboot.keymap` credential
    (`us`), so `systemd-firstboot` asks nothing, and the screen goes straight to
-   **Operating System Installer**, once the [Secure Boot](#secure-boot)
+   the disk question, once the [Secure Boot](#secure-boot)
    check has passed: silently when Secure Boot is on with the Bluefin Server
    keys, otherwise only after its warning.
-2. **Target disk.** sysinstall lists every disk it can install to as a
-   numbered menu, labelled with its `/dev/disk/by-id/` name (model and serial,
-   which is how you tell disks apart). The USB stick itself is never listed.
-   The input line comes pre-filled (upstream v261 `prompt_loop` preselect):
-   - **One disk:** its name is already filled in. Press **Enter**.
-   - **Several disks:** the line holds the names' common prefix (for example
-     `/dev/disk/by-id/nvme-`). Press **Ctrl-U** to clear it, type the
-     **number** in front of the disk, and press Enter. Typing the number
-     without clearing appends it to the prefix and is rejected as
-     `Invalid input …`.
-   Upstream v261 has no arrow-key menu; the number is the selector.
+2. **Target disk.** `bluefin-installer-disk.service` lists every disk
+   sysinstall can install to, numbered, with its size, model and
+   `/dev/disk/by-id/` name (model and serial), for example:
+
+   ```text
+   Install Bluefin Server 26.10.1 to which disk?
+   The installer erases the chosen disk completely; it asks once more before it starts.
+
+     1) 931.5G   Samsung SSD 980 PRO 1TB        nvme-Samsung_SSD_980_PRO_1TB_S5GXNX0R123456
+     2) 3.6T     WDC WD40EFRX-68N32N0           ata-WDC_WD40EFRX-68N32N0_WD-WCC7K0ABCDEF
+
+   Disk number (1-2), or q to cancel:
+   ```
+
+   Type the number and press Enter; with one disk, Enter alone takes it.
+   The USB stick itself is never listed: the list is systemd-repart's
+   `io.systemd.Repart.ListCandidateDevices` with `ignoreRoot`, the call
+   sysinstall makes for its own menu. Sizes are 1024-based, as systemd
+   prints them. The chosen disk becomes sysinstall's device argument
+   (`BLUEFIN_INSTALL_TARGET`, in
+   `/run/bluefin-installer-disk/sysinstall.env`), so sysinstall does not ask
+   for it again; it still checks that the install fits. Upstream v261's own
+   question shows one by-id name per disk and no size, and pre-fills the
+   names' common prefix, so picking one of several disks needed Ctrl-U first.
 3. **Summary.** The chosen disk is always erased (`--erase=yes`), whatever
    it holds (an earlier install, another OS), and the
    install is registered in the firmware boot menu (`--variables=yes`). Type
    `yes` to begin. This is the only confirmation.
-4. sysinstall installs, and the machine **reboots by itself** when it
-   succeeds. Remove the stick when the screen goes blank.
+4. sysinstall installs. When it succeeds, `bluefin-installer-done.service`
+   shows:
+
+   ```text
+   Bluefin Server 26.10.1 is installed.
+
+   The machine restarts into it in 15 seconds (Enter: now).
+   Remove the USB stick when the screen goes blank.
+
+   On its first start the installed system asks here for a new root
+   password; then log in as root with it.
+   ```
+
+   and the machine **restarts by itself**. The stick stays in until the
+   screen is blank: the installer's /usr is on it until then. Left in, the
+   firmware normally starts the new install anyway, which sysinstall put
+   first in its boot order.
 5. **First boot of the installed disk** asks, on the monitor (tty1), for a new
    **root password**, then asks again to confirm. It shows what you type unless
-   you press **Tab** first. Then log in as `root` with it.
-   **Do not answer this one with an empty password.** It is stock
-   `systemd-firstboot`, which reads an empty answer as "skip" and writes the
-   locked, invalid hash `!*` into the installed `/etc/shadow`.
-   `bluefin-root-password-prompt.service` is `ConditionFirstBoot=yes`, so it
-   never asks again, and a `passwd.*.root` credential added afterwards is
-   ignored — root is then locked for good. Unless the stick also provisioned
-   an admin user with `sudo` ("Developer mode" below), there is no login to
-   recover from and no fix short of reinstalling or editing `/etc/shadow`
-   from another system.
-   Type a password at both prompts, or pre-set one with a credential (see
-   "First-boot prompts" below).
+   you press **Tab** first. Then log in as `root` with it at the
+   `<hostname> login:` prompt. The prompt is stock
+   `systemd-firstboot --prompt-root-password`, which reads an empty answer as
+   "skip" and locks root with `!*`; `bluefin-root-password-prompt` then says
+   that root needs a password and asks again (`--force`), until root has one.
+   A `passwd.*.root` credential answers it instead (see "First-boot prompts"
+   below).
+6. **The login banner** above that prompt shows the node's hostname, its
+   addresses on every interface, and how to reach it over SSH once SSH is
+   enabled (see [Console banner](#console-banner)), followed by the version
+   and update state.
 
-Only two answers cancel: an empty answer at either prompt, and `no` at the
-confirmation (`Installation not confirmed, cancelling.`). Anything else
-upstream does not accept — a typo, an out-of-range number — is rejected with
-`Invalid input …` and the same prompt is asked again, so a mistyped answer
-never ends the install.
+Only these cancel: `q` at the disk question, and an empty answer or `no` at
+sysinstall's confirmation (`Installation not confirmed, cancelling.`). A
+wrong disk number is asked again, and anything else upstream does not accept
+is rejected with `Invalid input …` and the same prompt asked again, so a
+mistyped answer never ends the install. A cancelled disk question fails its
+unit, so sysinstall never starts and no disk is touched.
 
 After a cancel or a failed install the machine stays up: the drop-in sets
 `FailureAction=none` where upstream's unit halts. sysinstall's error stays on
@@ -135,6 +167,27 @@ itself from the official releases with no further steps, and its login
 banner shows the version, the last update check and any update error; see
 "Update health on the node" in
 [systemd-sysupdate-verification.md](systemd-sysupdate-verification.md).
+
+## Console banner
+
+The console's login banner (`/usr/lib/issue.d/30-bluefin.issue`, shown by
+agetty on tty1 and the serial console) uses agetty's escapes (util-linux
+2.42):
+
+```text
+Bluefin Server node1 (tty1)
+enp1s0: 192.0.2.10 2001:db8::10
+SSH, when enabled (keys only): ssh root@192.0.2.10
+Console: log in as root once root is set, at the first boot after a USB install or by credential; until then root is locked.
+Node access: https://github.com/projectbluefin/server/blob/main/docs/skills/tpm2-credential-sealing.md#node-access
+```
+
+`\n` is the hostname, `\a` the usable addresses of every interface, `\4`
+the best IPv4 address; agetty reprints the banner when an address changes,
+so a DHCP lease that arrives after the prompt still shows. The update lines
+follow ([systemd-sysupdate-verification.md](systemd-sysupdate-verification.md)),
+and on a Homelab control plane the join passphrase and the KubeStellar
+Console's address and login ([homelab-profile.md](homelab-profile.md)).
 
 ## Homelab entries
 
@@ -214,11 +267,14 @@ passes `--set-credential=bluefin.prompt-root-password:1` to sysinstall, which
 stores it next to the installed UKI. On that disk's first boot
 `bluefin-root-password-prompt.service` (`ConditionCredential=` on it, and
 `ConditionFirstBoot=yes`) runs stock `systemd-firstboot --prompt-root-password`
-on tty1, the monitor (the disk UKI's `/dev/console` is the serial port).
+on tty1, the monitor (the disk UKI's `/dev/console` is the serial port),
+through `/usr/libexec/bluefin-root-password-prompt`, which asks again while
+root has no password. It runs before `sysinit.target`, so the boot waits for
+the answer.
 Nodes installed any other way never get the credential and never prompt. A
 `passwd.hashed-password.root` / `passwd.plaintext-password.root` credential
-sets the password instead of the prompt, as `scripts/dogfood-installer.sh`
-does for the unattended test. See
+sets the password instead of the prompt, applied as given (also `!*`), as
+`scripts/dogfood-installer.sh` does for the unattended test. See
 [tpm2-credential-sealing.md](tpm2-credential-sealing.md).
 
 ## Credentials and the ESP
@@ -271,7 +327,10 @@ printf '!*' | enc passwd.hashed-password.root passwd.hashed-password.root.cred
 
 `passwd.hashed-password.root` answers the first-boot root password prompt
 (root stays locked; the admin user has sudo), so the node boots straight to
-SSH on port 22 with no one at the console. `passwd.hashed-password.<user>`
+SSH on port 22 with no one at the console. Leave that file out to also get a
+console login: the first boot then asks on the monitor for a root password,
+as without developer mode, and waits for it before anything else (SSH
+included) starts. `passwd.hashed-password.<user>`
 reaches systemd-sysusers through the image's
 `systemd-sysusers.service.d/10-bluefin-user-credentials.conf` (upstream imports
 root's only).
@@ -342,7 +401,9 @@ Unattended installs never ask: see [Unattended installs](#unattended-installs).
 
 - [ddi-installer.md](ddi-installer.md) — boot, install, and update architecture.
 - [ddi-installer-build.md](ddi-installer-build.md) — build and dogfood
-  (`just dogfood-installer`).
+  (`just dogfood-installer`; `DOGFOOD_INSTALL=console` types the install,
+  the root password and a tty1 login on the guest keyboard and checks the
+  screens above).
 - [tpm2-credential-sealing.md](tpm2-credential-sealing.md) — first-boot
   credentials and ESP credential files.
 - [secure-boot-keys.md](secure-boot-keys.md) — the keys that sign the stick.

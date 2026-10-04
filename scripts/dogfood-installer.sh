@@ -31,6 +31,20 @@
 #   5. install again from the stick onto that installed disk (ESP, both usr
 #      slots, xfs root), which must erase it like a blank one (#359)
 #   6. boot the reinstalled disk: a new root (boot 1), and step 3's checks
+#   DOGFOOD_INSTALL=console (no <next>, not prior-install, Secure Boot on)
+#   instead installs the way a person at the monitor does (#311): no
+#   unattended credential; the test types on the guest keyboard (QEMU
+#   monitor sendkey) and reads the monitor (tty1, mirrored to a virtio port):
+#   2. pick the target among two disks by its number in the installer's disk
+#      list (size, model, by-id name), type "yes" at sysinstall's
+#      confirmation, and see "installed ... remove the USB stick" before the
+#      restart; the other disk stays untouched
+#   3. the first boot asks for a root password on tty1: an empty answer is
+#      refused and asked again, then a password typed twice; the tty1 login
+#      banner shows the hostname and IP address, a wrong password is refused,
+#      and root logs in at tty1 with the password typed
+#   Every install also checks the "installed" screen, and every first boot
+#   the serial console's login banner (hostname and IP address).
 #   <next> is an image set with a higher version signed by the same key (dev
 #   keys locally, as in CI), or "release": the transfers stay on the image's
 #   own source (GitHub Releases) and the newest release must be found, staged
@@ -70,6 +84,8 @@
 #   DOGFOOD_SYSINSTALL_CRED=0  do not pass the unattended drop-in credential
 #   DOGFOOD_SECURE_BOOT=<mode> enforcing (default: the keys from step 1) or
 #                              off (firmware without Secure Boot)
+#   DOGFOOD_INSTALL=<mode>     unattended (default: the drop-in credential) or
+#                              console (typed at the monitor, see above)
 #   DOGFOOD_MEM=<MiB>          guest memory (default 4096)
 #   DOGFOOD_TIMEOUT=<s>        per-boot timeout (default 600)
 set -euo pipefail
@@ -101,6 +117,13 @@ case "${secure_boot}" in
     off) [ -z "${next}" ] && [ "${target_kind}" != prior-install ] \
         || { echo "ERROR: DOGFOOD_SECURE_BOOT=off does not combine with <next> or prior-install" >&2; exit 1; } ;;
     *) echo "ERROR: DOGFOOD_SECURE_BOOT must be enforcing or off, not '${secure_boot}'" >&2; exit 1 ;;
+esac
+install_mode="${DOGFOOD_INSTALL:-unattended}"
+case "${install_mode}" in
+    unattended) ;;
+    console) [ -z "${next}" ] && [ "${target_kind}" != prior-install ] && [ "${secure_boot}" = enforcing ] \
+        || { echo "ERROR: DOGFOOD_INSTALL=console does not combine with <next>, prior-install or DOGFOOD_SECURE_BOOT=off" >&2; exit 1; } ;;
+    *) echo "ERROR: DOGFOOD_INSTALL must be unattended or console, not '${install_mode}'" >&2; exit 1 ;;
 esac
 steps=4
 [ -z "${next}" ] || steps=6
@@ -193,7 +216,7 @@ qemu=(qemu-system-x86_64
     "${machine[@]}" -cpu host -m "${mem}" -smp 2
     -drive if=pflash,format=raw,unit=0,readonly=on,file="${code}"
     -drive if=pflash,format=raw,unit=1,file="${vars}"
-    -display none -monitor none -no-reboot
+    -display none -no-reboot
     )
 # snapshot=on keeps the release artifact untouched.
 stick=(-drive "if=none,id=stick,format=raw,snapshot=on,file=${installer}"
@@ -201,35 +224,144 @@ stick=(-drive "if=none,id=stick,format=raw,snapshot=on,file=${installer}"
 disk=(-drive "if=none,id=target,format=raw,file=${target}"
       -device "virtio-blk-pci,drive=target,serial=${target_serial}")
 
-# boot <name> <done-regex> <qemu args...>: run QEMU until it exits (-no-reboot
-# turns every reboot into an exit), <done-regex> shows up in the ttyS1 log,
-# or the timeout hits. Serial logs land in ${state}/<name>.*.log.
-boot() {
-    local name="$1" done_re="$2"; shift 2
+# boot_start <name> <qemu args...>: start QEMU in the background. Serial logs
+# land in ${state}/<name>.*.log; the monitor (what a person sees on tty1)
+# in <name>.screen.log, through a virtio port the dogfood-screen.service
+# credential writes to; <name>.mon is the QEMU monitor that types on the
+# guest keyboard (type_keys).
+boot_start() {
+    local name="$1"; shift
     local log="${state}/${name}"
+    rm -f "${log}.mon"
     "${qemu[@]}" "$@" \
         -serial "file:${log}.ttyS0" -serial "file:${log}.ttyS1" -serial "file:${log}.ttyS2" \
+        -monitor "unix:${log}.mon,server=on,wait=off" \
+        -device virtio-serial-pci,id=dogfood-vser \
+        -chardev "file,id=dogfood-screen,path=${log}.screen.log" \
+        -device virtserialport,bus=dogfood-vser.0,chardev=dogfood-screen,name=dogfood.screen \
         </dev/null >"${log}.qemu.log" 2>&1 &
-    local pid=$! deadline=$(( $(date +%s) + timeout_s ))
-    while kill -0 "${pid}" 2>/dev/null && [ "$(date +%s)" -lt "${deadline}" ]; do
+    qemu_pid=$! qemu_deadline=$(( $(date +%s) + timeout_s )) screen_seen=0
+}
+
+# boot_wait <name> <done-regex>: wait until QEMU exits (-no-reboot turns every
+# reboot into an exit), <done-regex> shows up in the ttyS1 log, or the
+# timeout hits.
+boot_wait() {
+    local name="$1" done_re="$2"
+    local log="${state}/${name}"
+    while kill -0 "${qemu_pid}" 2>/dev/null && [ "$(date +%s)" -lt "${qemu_deadline}" ]; do
         # A few seconds of grace so the journal mirror catches up.
         [ -n "${done_re}" ] && grep -aqE "${done_re}" "${log}.ttyS1" 2>/dev/null && { sleep 3; break; }
         sleep 2
     done
     local timed_out=0
-    if kill -0 "${pid}" 2>/dev/null; then
-        [ "$(date +%s)" -ge "${deadline}" ] && timed_out=1
-        kill "${pid}" 2>/dev/null || true
+    if kill -0 "${qemu_pid}" 2>/dev/null; then
+        [ "$(date +%s)" -ge "${qemu_deadline}" ] && timed_out=1
+        kill "${qemu_pid}" 2>/dev/null || true
     fi
-    wait "${pid}" 2>/dev/null || true
+    wait "${qemu_pid}" 2>/dev/null || true
     for s in ttyS0 ttyS1 ttyS2; do
         sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1bP[^\x1b]*\x1b\\//g' "${log}.${s}" 2>/dev/null \
             | tr -d '\r' > "${log}.${s}.log" || true
         rm -f "${log}.${s}"
     done
+    rm -f "${log}.mon"
     grep -aoE 'PROBE[ -].*' "${log}.ttyS1.log" || true
     [ "${timed_out}" = 0 ] || { tail -n 40 "${log}.ttyS0.log" >&2; fail "${name}: no result within ${timeout_s}s"; }
 }
+
+# boot <name> <done-regex> <qemu args...>
+boot() {
+    local name="$1" done_re="$2"; shift 2
+    boot_start "${name}" "$@"
+    boot_wait "${name}" "${done_re}"
+}
+
+# wait_screen <name> <ERE> [<seconds>]: wait until a snapshot of the monitor
+# taken since the last wait_screen shows <ERE> (each snapshot is the whole
+# screen, so text still on screen shows up again in the next one).
+wait_screen() {
+    local f="${state}/$1.screen.log" deadline=$(( $(date +%s) + ${3:-300} ))
+    while kill -0 "${qemu_pid}" 2>/dev/null && [ "$(date +%s)" -lt "${deadline}" ]; do
+        if tail -c "+$(( screen_seen + 1 ))" "${f}" 2>/dev/null | grep -aqE -- "$2"; then
+            screen_seen="$(stat -c %s "${f}")"
+            return 0
+        fi
+        sleep 1
+    done
+    kill "${qemu_pid}" 2>/dev/null || true
+    tail -n 30 "${f}" >&2 || true
+    fail "$1: the monitor never showed '$2'"
+}
+
+# wait_prompt <name> <ERE> [<seconds>]: wait until the line with the cursor
+# on the monitor (where it waits for input) matches <ERE>.
+wait_prompt() {
+    local deadline=$(( $(date +%s) + ${3:-300} ))
+    while kill -0 "${qemu_pid}" 2>/dev/null && [ "$(date +%s)" -lt "${deadline}" ]; do
+        awk '/^=== screen /{y=$NF; n=0; line=""; next} {n++; if (n == y + 1) line=$0} END{print line}' \
+            "${state}/$1.screen.log" 2>/dev/null | grep -aqE -- "$2" && return 0
+        sleep 1
+    done
+    kill "${qemu_pid}" 2>/dev/null || true
+    tail -n 30 "${state}/$1.screen.log" >&2 || true
+    fail "$1: the monitor never asked '$2'"
+}
+
+# last_screen <name>: the newest snapshot of the monitor.
+last_screen() { awk '/^=== screen /{buf=""; next} {buf=buf $0 "\n"} END{printf "%s", buf}' "${state}/$1.screen.log"; }
+
+# type_keys <name> <text>: type <text> on the guest's keyboard through the
+# QEMU monitor (sendkey); a newline is Enter.
+type_keys() {
+    python3 - "${state}/$1.mon" "$2" <<'PY'
+import socket, sys, time
+keys = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash", "=": "equal", ",": "comma"}
+with socket.socket(socket.AF_UNIX) as s:
+    s.connect(sys.argv[1])
+    for ch in sys.argv[2]:
+        s.sendall(f"sendkey {keys.get(ch, ch)}\n".encode())
+        time.sleep(0.15)
+    time.sleep(0.5)
+PY
+}
+
+# The monitor (the foreground VT: the installer's /dev/console, the installed
+# disk's tty1) as text on the dogfood.screen virtio port, whenever it changes.
+# Started early (sysinit.target), so it sees the first-boot prompt.
+cat > "${state}/screen.sh" <<'SCREEN'
+export LC_ALL=C
+port=/dev/virtio-ports/dogfood.screen last=""
+while :; do
+    if [ -w "${port}" ] && [ -r /dev/vcsa ]; then
+        # vcsa starts with the screen's rows, columns and the cursor's x, y.
+        read -r _ cols _ y < <(od -An -tu1 -N4 /dev/vcsa)
+        screen="cursor ${y}
+$(tr '\000-\037\177-\377' '?' < /dev/vcs | fold -w "${cols:-80}" | sed 's/ *$//')"
+        if [ "${screen}" != "${last}" ]; then
+            printf '=== screen %s %s\n' "$(cut -d' ' -f1 /proc/uptime)" "${screen}" > "${port}"
+            last="${screen}"
+        fi
+    fi
+    sleep 0.5
+done
+SCREEN
+cat > "${state}/screen.service" <<'UNIT'
+[Unit]
+Description=Dogfood monitor mirror
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+[Service]
+ImportCredential=dogfood.screen
+ExecStart=/bin/bash ${CREDENTIALS_DIRECTORY}/dogfood.screen
+UNIT
+printf '[Unit]\nWants=dogfood-screen.service\n' > "${state}/screen-wants.conf"
+screen_creds=(
+    -smbios "$(cred dogfood.screen "${state}/screen.sh")"
+    -smbios "$(cred systemd.extra-unit.dogfood-screen.service "${state}/screen.service")"
+    -smbios "$(cred systemd.unit-dropin.sysinit.target~dogfood-screen "${state}/screen-wants.conf")"
+)
 
 if [ "${secure_boot}" = off ]; then
     echo "==> 1/${steps} firmware without Secure Boot (${code##*/}): nothing to enroll"
@@ -264,16 +396,33 @@ ExecStart=journalctl -b -f --no-pager -o short-monotonic
 StandardOutput=tty
 TTYPath=/dev/ttyS2
 EOF
-install_creds=(-smbios "$(cred systemd.extra-unit.dogfood-journal.service "${state}/journal.service")")
+# Wanted by sysinit.target too: the console install has no sysinstall drop-in.
+printf '[Unit]\nWants=dogfood-journal.service\n' > "${state}/journal-wants.conf"
+install_creds=(-smbios "$(cred systemd.extra-unit.dogfood-journal.service "${state}/journal.service")"
+    -smbios "$(cred systemd.unit-dropin.sysinit.target~dogfood-journal "${state}/journal-wants.conf")")
 # systemd-firstboot prompts on the installer console first; answer it the
 # unattended way. sysinstall copies locale, keymap and timezone to the target.
 for kv in firstboot.locale=C.UTF-8 firstboot.keymap=us firstboot.timezone=UTC 'passwd.hashed-password.root=!*'; do
     printf '%s' "${kv#*=}" > "${state}/${kv%%=*}"
     install_creds+=(-smbios "$(cred "${kv%%=*}" "${state}/${kv%%=*}")")
 done
-if [ "${DOGFOOD_SYSINSTALL_CRED:-1}" != 0 ]; then
+install_creds+=("${screen_creds[@]}")
+if [ "${install_mode}" = unattended ] && [ "${DOGFOOD_SYSINSTALL_CRED:-1}" != 0 ]; then
     install_creds+=(-smbios "$(cred systemd.unit-dropin.systemd-sysinstall.service "${state}/sysinstall.conf")")
 fi
+
+# check_done_screen <name>: after the install, before the restart, the
+# monitor said so (bluefin-installer-done.service).
+check_done_screen() {
+    local text
+    for text in 'is installed.' 'Remove the USB stick when the screen goes blank.'; do
+        grep -aqF "${text}" "${state}/$1.screen.log" \
+            || fail "$1: the monitor did not show '${text}' before the restart"
+    done
+    grep -aq 'bluefin-installer-done: installed, restarting' "${state}/$1.ttyS2.log" \
+        || fail "$1: bluefin-installer-done.service did not run"
+    grep -aF -B2 -A8 'is installed.' "${state}/$1.screen.log" | tail -n 11 | sed 's/^/    screen| /'
+}
 
 # run_install <name>: boot the stick with the target attached; sysinstall must
 # succeed and leave exactly the ESP and usr slot A (+ verity) on the target.
@@ -286,6 +435,48 @@ run_install() {
         || { grep -aE 'sysinstall|repart' "${state}/$1.ttyS2.log" | grep -v audit | tail -n 20 >&2 || true; fail "$1: systemd-sysinstall did not succeed"; }
     grep -aq 'PROBE installed-slot-b=0 installed-parts=3' "${log}" \
         || fail "$1: the target holds more than the ESP and usr slot A (+ verity) before its first boot"
+    check_done_screen "$1"
+}
+
+# console_install <name>: install the way a person at the monitor does: pick
+# the target by its number among two disks, confirm with "yes", see the
+# "installed" screen, press Enter to restart.
+console_install() {
+    local name="$1" log="${state}/$1" decoy="${state}/decoy.raw" list n
+    rm -f "${decoy}"
+    truncate -s 8G "${decoy}"
+    cat > "${state}/done-probe.conf" <<EOF
+[Service]
+ExecStartPre=/bin/bash -c 'exec >/dev/ttyS1 2>&1; udevadm settle -t 10 || true; echo "PROBE sysinstall=\$\$(systemctl show -P Result systemd-sysinstall.service) installed-slot-b=\$\$(lsblk -rno PARTLABEL ${target_dev} | grep -cx _empty) installed-parts=\$\$(lsblk -rno TYPE ${target_dev} | grep -cx part) decoy-parts=\$\$(lsblk -rno TYPE /dev/disk/by-id/virtio-bluefin-decoy | grep -cx part)"; sed "s/^/PROBE-LOG disk-choice /" /run/bluefin-installer-disk/sysinstall.env'
+EOF
+    boot_start "${name}" "${stick[@]}" "${disk[@]}" \
+        -drive "if=none,id=decoy,format=raw,file=${decoy}" -device virtio-blk-pci,drive=decoy,serial=bluefin-decoy \
+        -nic none "${install_creds[@]}" -smbios "$(cred systemd.unit-dropin.bluefin-installer-done.service "${state}/done-probe.conf")"
+    wait_prompt "${name}" 'Disk number \(1-2\), or q to cancel:$'
+    list="$(last_screen "${name}" | grep -E '^  [0-9]\) ')"
+    printf '%s\n' "${list}" | sed 's/^/    screen| /'
+    n="$(printf '%s\n' "${list}" | sed -n 's/^  \([0-9]\)) .* virtio-bluefin-target$/\1/p')"
+    [ -n "${n}" ] || fail "${name}: the target is not in the installer's disk list"
+    printf '%s\n' "${list}" | grep -qE "^  ${n}\) 16G +.* virtio-bluefin-target$" || fail "${name}: the disk list does not show the target's size"
+    printf '%s\n' "${list}" | grep -qE '^  [0-9]\) 8G +.* virtio-bluefin-decoy$' || fail "${name}: the disk list does not show the other disk"
+    ! printf '%s\n' "${list}" | grep -q 'bluefin-installer' || fail "${name}: the installer offers its own stick"
+    type_keys "${name}" $'9\n'
+    wait_screen "${name}" 'There is no disk 9\.'
+    wait_prompt "${name}" 'Disk number \(1-2\), or q to cancel:$'
+    type_keys "${name}" "${n}"$'\n'
+    wait_screen "${name}" "type 'yes' to confirm"
+    last_screen "${name}" | grep -qF "${target_dev}" || fail "${name}: sysinstall's summary does not show ${target_dev}"
+    last_screen "${name}" | sed '/^$/d' | sed 's/^/    screen| /'
+    type_keys "${name}" $'yes\n'
+    wait_screen "${name}" 'is installed\.' "${timeout_s}"
+    # Enter restarts at once, without the countdown.
+    type_keys "${name}" $'\n'
+    boot_wait "${name}" ''
+    grep -aq "PROBE sysinstall=success installed-slot-b=0 installed-parts=3 decoy-parts=0" "${log}.ttyS1.log" \
+        || fail "${name}: expected the ESP and usr slot A (+ verity) on the target and the other disk untouched: $(grep -ao 'PROBE sysinstall=.*' "${log}.ttyS1.log")"
+    grep -aqF "PROBE-LOG disk-choice BLUEFIN_INSTALL_TARGET=${target_dev}" "${log}.ttyS1.log" \
+        || fail "${name}: the disk question did not hand ${target_dev} to sysinstall"
+    check_done_screen "${name}"
 }
 
 if [ "${secure_boot}" = off ]; then
@@ -312,6 +503,9 @@ CHECK
     grep -aq 'PROBE secure-boot-check=passed' "${state}/2-install.ttyS1.log" || fail "2-install: the Secure Boot check did not pass"
     grep -aq 'continuing without Secure Boot (credential bluefin.install-allow-insecure-boot)' "${state}/2-install.ttyS2.log" \
         || fail "2-install: the check did not log why it continued"
+elif [ "${install_mode}" = console ]; then
+    echo "==> 2/${steps} offline install onto a ${target_kind} disk, typed at the monitor"
+    console_install 2-install
 else
     echo "==> 2/${steps} offline install onto a ${target_kind} disk: ExecStart=${exec_start} ${install_args} ${target_dev}"
     run_install 2-install
@@ -340,6 +534,14 @@ echo "PROBE timers-enabled=$(systemctl is-enabled systemd-sysupdate.timer system
 echo "PROBE keyring=$(sha256sum < /usr/lib/systemd/import-pubring.pgp | cut -d' ' -f1) etc-override=$(test -e /etc/systemd/import-pubring.pgp && echo present || echo none)"
 systemctl start boot-complete.target 2>/dev/null || true
 echo "PROBE bless=$(/usr/lib/systemd/systemd-bless-boot status 2>/dev/null)"
+IFS=: read -r _ hash _ < <(grep '^root:' /etc/shadow)
+case "${hash}" in '' | '!'* | '*'*) echo "PROBE root-password=locked" ;; *) echo "PROBE root-password=set" ;; esac
+# The login banner as agetty renders it (it needs a terminal on stdin), once
+# DHCP gave an address.
+for _ in $(seq 60); do ip -4 -o addr show scope global | grep -q ' inet ' && break; sleep 1; done
+echo "PROBE hostname=$(hostname)"
+echo "PROBE ipv4=$(ip -4 -o addr show scope global | sed -n 's/.* inet \([0-9.]*\)\/.*/\1/p' | head -n1)"
+echo "PROBE issue=$(agetty --show-issue < /dev/ttyS1 2>/dev/null | tr -d '\r' | tr '\n' '|')"
 banner boot
 boots=$(( $(cat /var/lib/dogfood-boots 2>/dev/null || echo 0) + 1 ))
 echo "${boots}" > /var/lib/dogfood-boots
@@ -426,13 +628,29 @@ UNIT
 printf '[Unit]\nWants=dogfood-probe.service\n' > "${state}/probe-wants.conf"
 # The installed disk asks for a root password on its first boot
 # (bluefin-root-password-prompt.service); a passwd credential answers it.
+# probe_creds <probe> [prompt]: with "prompt" no passwd credential, so the
+# first boot asks for the root password on tty1.
 probe_creds() {
     creds=(
         -smbios "$(cred dogfood.probe "$1")"
         -smbios "$(cred systemd.extra-unit.dogfood-probe.service "${state}/probe.service")"
         -smbios "$(cred systemd.unit-dropin.multi-user.target~dogfood-probe "${state}/probe-wants.conf")"
-        -smbios "$(cred passwd.hashed-password.root "${state}/passwd.hashed-password.root")"
+        "${screen_creds[@]}"
     )
+    [ "${2:-}" = prompt ] || creds+=(-smbios "$(cred passwd.hashed-password.root "${state}/passwd.hashed-password.root")")
+}
+
+# check_issue <name>: the login banner, as agetty renders it, shows the
+# node's hostname and IPv4 address and how to reach it over SSH.
+check_issue() {
+    local log="${state}/$1.ttyS1.log" host ip issue
+    host="$(sed -n 's/^PROBE hostname=//p' "${log}" | tail -n1)"
+    ip="$(sed -n 's/^PROBE ipv4=//p' "${log}" | tail -n1)"
+    issue="$(sed -n 's/^PROBE issue=//p' "${log}" | tail -n1)"
+    [ -n "${host}" ] && [ -n "${ip}" ] || fail "$1: no hostname or IPv4 address to look for"
+    [[ "${issue}" == "Bluefin Server ${host} ("* ]] || fail "$1: the login banner does not start with the hostname ${host}: ${issue}"
+    [[ "${issue}" == *"|"*": ${ip}"* ]] || fail "$1: the login banner does not list ${ip}: ${issue}"
+    [[ "${issue}" == *"|SSH, when enabled (keys only): ssh root@${ip}|"* ]] || fail "$1: the login banner has no SSH line for ${ip}: ${issue}"
 }
 keyring="${dir}/sysupdate-keys/import-pubring.pgp"
 [ -f "${keyring}" ] || keyring="${here}/../files/os/sysupdate-keys/import-pubring.gpg"
@@ -474,10 +692,64 @@ banner_lacks() {
     ! grep -aF "PROBE banner-$2=" "${log}" | grep -aqF -- "$3" || fail "$1: console banner after '$2' still shows '$3'"
 }
 
-probe_creds "${state}/probe.sh"
-echo "==> 3/${steps} first boot of the target (creates slot B and the xfs root)"
-boot 3-first-boot 'PROBE failed=' "${disk[@]}" -nic user,model=virtio-net-pci "${creds[@]}"
+# console_first_boot <name>: the first boot asks for the root password on
+# tty1; an empty answer is refused, then a password typed twice. At the tty1
+# login the banner shows the hostname and IP address, a wrong password is
+# refused, and root logs in with the password typed.
+console_first_boot() {
+    local name="$1" log="${state}/$1" pw
+    pw="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+    boot_start "${name}" "${disk[@]}" -nic user,model=virtio-net-pci "${creds[@]}"
+    wait_prompt "${name}" 'new root password' "${timeout_s}"
+    type_keys "${name}" $'\n'
+    wait_screen "${name}" 'not accepted here' 60
+    wait_prompt "${name}" 'new root password' 60
+    type_keys "${name}" "${pw}"$'\n'
+    wait_prompt "${name}" 'root password again' 60
+    type_keys "${name}" "${pw}"$'\n'
+    # agetty reprints the banner when DHCP adds the address.
+    wait_screen "${name}" 'ssh root@[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'
+    wait_prompt "${name}" ' login:$'
+    last_screen "${name}" > "${log}.login-screen.log"
+    sed '/^$/d; s/^/    screen| /' "${log}.login-screen.log"
+    type_keys "${name}" $'root\n'
+    wait_prompt "${name}" 'Password:$' 60
+    type_keys "${name}" $'wrongpassword\n'
+    wait_screen "${name}" 'Login incorrect' 60
+    wait_prompt "${name}" ' login:$' 60
+    type_keys "${name}" $'root\n'
+    wait_prompt "${name}" 'Password:$' 60
+    type_keys "${name}" "${pw}"$'\n'
+    wait_prompt "${name}" '[#$]$' 60
+    type_keys "${name}" $'id\n'
+    wait_screen "${name}" 'uid=0\(root\) gid=0\(root\)' 60
+    last_screen "${name}" | sed '/^$/d' | tail -n 6 | sed 's/^/    screen| /'
+    boot_wait "${name}" 'PROBE failed='
+    grep -aqF 'Please enter the new root password' "${log}.screen.log" || fail "${name}: no root password prompt on tty1"
+    grep -aq 'PROBE root-password=set' "${log}.ttyS1.log" || fail "${name}: root has no password after the prompt"
+    grep -aqF 'would lock root for good, so it is not accepted here.' "${log}.screen.log" \
+        || fail "${name}: the empty answer was not refused"
+    local host ip
+    host="$(sed -n 's/^PROBE hostname=//p' "${log}.ttyS1.log" | tail -n1)"
+    ip="$(sed -n 's/^PROBE ipv4=//p' "${log}.ttyS1.log" | tail -n1)"
+    grep -qF "Bluefin Server ${host} (tty1)" "${log}.login-screen.log" || fail "${name}: the tty1 banner does not show the hostname ${host}"
+    grep -qE ": ${ip//./\\.}( |$)" "${log}.login-screen.log" || fail "${name}: the tty1 banner does not list ${ip}"
+    grep -qF "ssh root@${ip}" "${log}.login-screen.log" || fail "${name}: the tty1 banner has no SSH line for ${ip}"
+}
+
+if [ "${install_mode}" = console ]; then
+    probe_creds "${state}/probe.sh" prompt
+    echo "==> 3/${steps} first boot of the target: root password and login typed at tty1"
+    console_first_boot 3-first-boot
+else
+    probe_creds "${state}/probe.sh"
+    echo "==> 3/${steps} first boot of the target (creates slot B and the xfs root)"
+    boot 3-first-boot 'PROBE failed=' "${disk[@]}" -nic user,model=virtio-net-pci "${creds[@]}"
+    # The passwd.hashed-password.root credential answered the prompt, as given.
+    grep -aq 'PROBE root-password=locked' "${state}/3-first-boot.ttyS1.log" || fail "3-first-boot: the credential did not answer the root password prompt"
+fi
 check_disk_boot 3-first-boot 1 "${ver}" 2
+check_issue 3-first-boot
 banner_has 3-first-boot boot 'Last update check: never'
 
 echo "==> 4/${steps} boot the target with the installer still attached"
@@ -495,6 +767,7 @@ if [ "${target_kind}" = prior-install ]; then
     check_disk_boot 6-reinstalled-boot 1 "${ver}" 2
 fi
 
+[ "${install_mode}" != console ] || { echo "PASS: offline installer installed ${ver} at the console: the target picked by number from a list with size and model, confirmed, 'installed, remove the USB stick' shown before the restart; the first boot refused an empty root password, took one typed at tty1, showed the hostname and IP address on the login banner, and root logged in at tty1 with it"; exit 0; }
 [ -n "${next}" ] || { echo "PASS: offline installer installed ${ver} onto a ${target_kind} disk$([ "${target_kind}" = prior-install ] && echo ' and again over that install')$([ "${secure_boot}" = off ] && echo ' without Secure Boot, only once a credential allowed it'); the target booted from its own bluefin_usr_${ver} slot (also with the installer attached) with slot B and the xfs root created on first boot and no failed units"; exit 0; }
 
 if [ -n "${next_ver}" ]; then

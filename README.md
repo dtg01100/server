@@ -48,6 +48,7 @@ Verify the download against the GPG-signed `SHA256SUMS` before use; the release 
 ### Install from the USB stick
 
 Secure Boot is required. Write `bluefin-server-installer_<ver>.raw` to a USB stick, put the machine's firmware into Secure Boot **Setup Mode**, boot the stick, and choose **Enroll the Bluefin Server keys and restart** when the installer offers it; after the restart it installs with Secure Boot on. If Secure Boot is off or the firmware trusts other keys, the installer stops before touching any disk and shows what to change in the firmware; installing anyway needs an explicit **Continue without Secure Boot**. The firmware steps, what the warning means and unattended installs are in [`docs/skills/usb-installer.md`](docs/skills/usb-installer.md) ("Secure Boot").
+The installer then lists the disks with their size and model: type the number of the disk to install to and confirm with `yes`. It says when the install is done and restarts; remove the stick when the screen goes blank. The first start asks on the screen for a root password, then you log in as root at the console; the login banner shows the node's hostname and IP address ([`docs/skills/usb-installer.md`](docs/skills/usb-installer.md), "Using the installer").
 
 ## Quick start
 

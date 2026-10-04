@@ -35,6 +35,16 @@ description: |
   explained on the console and cancels unless the operator (or, unattended,
   the bluefin.install-allow-insecure-boot credential) allows it.
 
+  /usr/libexec/bluefin-installer-disk and bluefin-installer-done, and their
+  units, also run on the USB installer only: the target-disk question with
+  each disk's size and model before systemd-sysinstall, and the "installed,
+  restarting" screen after it.
+
+  /usr/libexec/bluefin-root-password-prompt runs on the first boot of a disk
+  the USB installer wrote (bluefin-root-password-prompt.service): stock
+  systemd-firstboot --prompt-root-password, asked again until root has a
+  password.
+
 build-depends:
   - base/base-stack.bst
 
@@ -70,3 +80,9 @@ config:
         "%{install-root}/usr/libexec/bluefin-homelab-install"
       install -Dm0755 libexec-src/bluefin-installer-secure-boot \
         "%{install-root}/usr/libexec/bluefin-installer-secure-boot"
+      install -Dm0755 libexec-src/bluefin-installer-disk \
+        "%{install-root}/usr/libexec/bluefin-installer-disk"
+      install -Dm0755 libexec-src/bluefin-installer-done \
+        "%{install-root}/usr/libexec/bluefin-installer-done"
+      install -Dm0755 libexec-src/bluefin-root-password-prompt \
+        "%{install-root}/usr/libexec/bluefin-root-password-prompt"

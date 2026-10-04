@@ -4,7 +4,7 @@ description: Securing provisioning credentials (such as hashed root passwords or
 metadata:
   type: how-to
   status: stable
-  last_updated: "2026-09-28"
+  last_updated: "2026-10-04"
   context7-sources:
     - /systemd/systemd
 ---
@@ -66,7 +66,8 @@ node:
   `bluefin-root-password-prompt.service` asks for a root password on tty1 on
   that disk's first boot, because the person who ran the installer is at the
   console (see [usb-installer.md](usb-installer.md)). Either credential above
-  answers that prompt unattended; an empty answer at it locks root for good.
+  answers that prompt unattended, as given; without one it asks again until
+  root has a password.
 
 `systemd-firstboot` runs on first boot only. A diskless node rebuilds `/etc`
 from `/usr/share/factory/etc` and is on its first boot every time, so the
