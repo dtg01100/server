@@ -36,6 +36,9 @@ ADMIN_CONF = "/etc/kubernetes/admin.conf"
 SHARE = "/usr/share/bluefin/kubeadm"
 CRI_SOCKET = "unix:///run/containerd/containerd.sock"
 TAINT = "node-role.kubernetes.io/control-plane:NoSchedule"
+# kubeadm's LabelExcludeFromExternalLB, which its mark-control-plane phase puts
+# on a control plane next to TAINT; MetalLB's speakers skip a node carrying it.
+LABEL = "node.kubernetes.io/exclude-from-external-load-balancers"
 
 
 def kubernetes_version() -> str:
@@ -149,15 +152,33 @@ def run_init(tmp_path: Path):
     Returns ``(returncode, calls, kubeconfig link)``; each call is one argv.
     """
 
-    def run(*, init_rc: int = 0, taints: str = TAINT.split(":")[0]) -> tuple[int, list[list[str]], Path]:
+    def run(
+        *,
+        init_rc: int = 0,
+        taints: str = TAINT.split(":")[0],
+        nodes: tuple[str, ...] = ("cp",),
+        labelled: tuple[str, ...] = ("cp",),
+    ) -> tuple[int, list[list[str]], Path]:
         stubs = tmp_path / "bin"
         stubs.mkdir(exist_ok=True)
         calls = tmp_path / "calls"
         calls.write_text("", encoding="utf-8")
+
+        def names(items: tuple[str, ...]) -> str:
+            return "printf '" + "".join(f"node/{n}\\n" for n in items) + "'"
+
+        # Only a selector on exactly LABEL finds the `labelled` nodes.
+        kubectl = (
+            '[ "$1" = get ] && case "$*" in'
+            f' *taints*) echo "{taints}";;'
+            f' "get nodes -l {LABEL} -o name") {names(labelled)};;'
+            f' "get nodes -o name") {names(nodes)};;'
+            ' esac'
+        )
         for tool, body in {
             "systemctl": "",
             "kubeadm": f'[ "$1" = init ] && exit {init_rc}',
-            "kubectl": f'[ "$1" = get ] && echo "{taints}"',
+            "kubectl": kubectl,
         }.items():
             (stubs / tool).write_text(
                 f'#!/bin/sh\nprintf "%s\\0" {tool} "$@" >> "$CALLS"; printf "\\n" >> "$CALLS"\n{body}\nexit 0\n',
@@ -195,6 +216,29 @@ def test_init_leaves_an_untainted_node_alone(run_init) -> None:
     rc, calls, _ = run_init(taints="example.com/other")
     assert rc == 0
     assert not [c for c in calls if c[:2] == ["kubectl", "taint"]]
+
+
+def test_init_lets_load_balancers_reach_the_only_node(run_init) -> None:
+    # With the label, MetalLB announces no LoadBalancer address from the
+    # cluster's only node (#371).
+    rc, calls, _ = run_init()
+    assert rc == 0
+    untaint = ["kubectl", "taint", "nodes", "--all", f"{TAINT}-"]
+    unlabel = ["kubectl", "label", "node/cp", f"{LABEL}-"]
+    assert unlabel in calls and calls.index(untaint) < calls.index(unlabel)
+    assert [c for c in calls if c[:2] == ["kubectl", "label"]] == [unlabel]
+
+
+def test_init_leaves_a_node_without_the_label_alone(run_init) -> None:
+    rc, calls, _ = run_init(labelled=())
+    assert rc == 0
+    assert not [c for c in calls if c[:2] == ["kubectl", "label"]]
+
+
+def test_init_keeps_the_label_once_the_cluster_has_other_nodes(run_init) -> None:
+    rc, calls, _ = run_init(nodes=("cp", "worker"))
+    assert rc == 0
+    assert not [c for c in calls if c[:2] == ["kubectl", "label"]]
 
 
 def test_failed_init_resets_so_the_retry_is_not_skipped(run_init) -> None:
