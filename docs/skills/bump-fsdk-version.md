@@ -4,7 +4,7 @@ description: Move Bluefin Server to a new freedesktop-sdk release and refresh th
 metadata:
   type: how-to
   status: stable
-  last_updated: "2026-09-27"
+  last_updated: "2026-10-03"
   context7-sources:
     - /apache/buildstream
 ---
@@ -74,12 +74,13 @@ Before merging a bump:
   it; there is no gnome-build-meta junction to keep in step.
 - A point-release tag is immutable: once a GitHub Release for a given
   `image-version` is published, never republish different bits under it.
-- **Two patches live under `patches/freedesktop-sdk/`.** `0001` adds the GNOME
+- **Three patches live under `patches/freedesktop-sdk/`.** `0001` adds the GNOME
   CAS servers to `project.conf`; **`0006`
   carries the Cilium/Kubernetes kernel options** (VXLAN, GENEVE, tc BPF,
-  conntrack/ss diagnostics). A bumper must not drop `0006` or the kubeadm and
+  conntrack/ss diagnostics) and `0007` the hardware watchdog core and drivers,
+  appended below `0006` in the same `fdsdk-config.sh`. A bumper must not drop `0006` or the kubeadm and
   k0s sysexts lose their datapath. If a release changed a patched file,
-  refresh the patch in place; never delete `0006` because "it looks small". Why each patch exists and when it can be dropped is in
+  refresh the patches in place, `0006` before `0007`; never delete `0006` because "it looks small". Why each patch exists and when it can be dropped is in
   [`patches/README.md`](../../patches/README.md).
 - Junction overrides are only meaningful for components your local elements
   reference directly. The 25 GNOME sdk/* overrides (cairo, gtk3, pango, glib,
