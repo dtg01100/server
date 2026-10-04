@@ -45,6 +45,11 @@ Each push to `main` publishes an immutable [GitHub Release](https://github.com/p
 
 Verify the download against the GPG-signed `SHA256SUMS` before use; the release public keyring is [`files/os/sysupdate-keys/import-pubring.gpg`](files/os/sysupdate-keys/import-pubring.gpg), and the verification and attestation steps are in [`docs/skills/systemd-sysupdate-verification.md`](docs/skills/systemd-sysupdate-verification.md).
 
+### Install from the USB stick
+
+Secure Boot is required. Write `bluefin-server-installer_<ver>.raw` to a USB stick, put the machine's firmware into Secure Boot **Setup Mode**, boot the stick, and choose **Enroll the Bluefin Server keys and restart** when the installer offers it; after the restart it installs with Secure Boot on. If Secure Boot is off or the firmware trusts other keys, the installer stops before touching any disk and shows what to change in the firmware; installing anyway needs an explicit **Continue without Secure Boot**. The firmware steps, what the warning means and unattended installs are in [`docs/skills/usb-installer.md`](docs/skills/usb-installer.md) ("Secure Boot").
+The installer then lists the disks with their size and model: type the number of the disk to install to and confirm with `yes`. It says when the install is done and restarts; remove the stick when the screen goes blank. The first start asks on the screen for a root password, then you log in as root at the console; the login banner shows the node's hostname and IP address ([`docs/skills/usb-installer.md`](docs/skills/usb-installer.md), "Using the installer").
+
 ## Quick start
 
 You need only `podman` and [`just`](https://github.com/casey/just). BuildStream runs inside the FSDK `bst2` container, so BuildStream is not installed locally.
@@ -68,7 +73,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the contributor checklist, Conventi
 
 ## Security and release trust
 
-- **Signed boot chain**: Secure Boot keys enroll from the ESP on first boot (`secure-boot-enroll if-safe` in VMs, or manually via systemd-boot menu in firmware Setup Mode on bare metal); local builds use throwaway keys from `just gen-dev-keys`.
+- **Signed boot chain**: Secure Boot keys enroll from the ESP on first boot (`secure-boot-enroll if-safe` in VMs; on bare metal in firmware Setup Mode, from the USB installer's prompt or the systemd-boot menu); the USB installer refuses to install without Secure Boot on with these keys unless told explicitly. Local builds use throwaway keys from `just gen-dev-keys`.
 - **Signed manifests**: the build signs one combined `SHA256SUMS` over the whole image set (OS images, UKIs, sysexts) inside `oci/bluefin-server-image.bst`; a release publishes `dist/diskless/` as-is to GitHub Releases and as an OCI artifact.
 - **Sysupdate verification**: installed nodes verify updates against the signed manifest (`Verify=yes`), and the diskless pull checks the same signature in the initrd; see [`docs/skills/systemd-sysupdate-verification.md`](docs/skills/systemd-sysupdate-verification.md) for details.
 - **Provenance and SBOM**: releases carry SLSA provenance and SPDX SBOM attestations; see [`docs/skills/systemd-sysupdate-verification.md`](docs/skills/systemd-sysupdate-verification.md) for verification.

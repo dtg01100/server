@@ -252,7 +252,7 @@ console_ready() {
 		warn "kubestellar-console: GitHub sign-in without HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS: any GitHub account past the login password can sign in"
 	fi
 	password=$(k -n kubestellar-console get secret kubestellar-console-login -o 'jsonpath={.data.password}' 2>/dev/null | base64 -d 2>/dev/null) || password=
-	if ! mkdir -p "${issue%/*}" || ! (umask 077 && printf 'KubeStellar Console: http://kubestellar.%s (user admin, password %s)\nThe password: %s\n\n' \
+	if ! mkdir -p "${issue%/*}" || ! (umask 077 && printf 'KubeStellar Console: https://kubestellar.%s (user admin, password %s)\nThe password: %s\n\n' \
 		"$(input DOMAIN)" "${password:-unknown}" "${read}" >"${issue}" && chmod 0600 "${issue}"); then
 		warn "kubestellar-console: could not show the login on the console"
 	fi
@@ -366,6 +366,12 @@ apply_component() {
 			apply_secrets "${dir}" || return 1
 			secrets_done=1
 		fi
+		# The Gateway's certificate lives in envoy-gateway-system, which
+		# only envoy-gateway creates.
+		if [ "$(basename "${file}")" = 23-gateway-cert.yaml ] && ! enabled HOMELAB_ENVOY_GATEWAY on; then
+			notice "${COMPONENT}: skipping 23-gateway-cert.yaml: HOMELAB_ENVOY_GATEWAY=no"
+			continue
+		fi
 		apply_file "${file}" || return 1
 	done
 	[ -n "${secrets_done}" ] || apply_secrets "${dir}"
@@ -391,6 +397,11 @@ apply_entry() {
 	if [ "${id}" = argocd ] && [ "${RUNTIME}" = k0s ] && [ -e "${ROOT}/var/lib/k0s/manifests/argocd" ]; then
 		notice "${id}: managed by the kubestellar sysext's k0s manifests"
 		return 0
+	fi
+	# Add-on routes bind only to the Gateway's https listener, whose
+	# certificate (homelab-tls) comes from cert-manager; port 80 only redirects.
+	if grep -qs 'sectionName: https' "${path}"/*.yaml && ! enabled HOMELAB_CERT_MANAGER on >/dev/null; then
+		warn "${id}: HOMELAB_CERT_MANAGER=no: the Gateway's https listener has no certificate, so ${id} is unreachable"
 	fi
 	notice "${id}: applying"
 	if apply_component "${path}"; then

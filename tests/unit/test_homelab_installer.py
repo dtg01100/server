@@ -127,14 +127,15 @@ def test_unit_runs_only_from_a_homelab_entry_before_sysinstall() -> None:
 def test_sysinstall_appends_the_homelab_arguments_and_nothing_for_server() -> None:
     dropin = SystemdFile(DROPIN)
     exec_start = dropin.values("Service", "ExecStart")[-1]
-    assert exec_start.split()[-1] == "$BLUEFIN_INSTALL_ARGS"
+    # The target disk the console question chose, if any, comes last.
+    assert exec_start.split()[-2:] == ["$BLUEFIN_INSTALL_ARGS", "$BLUEFIN_INSTALL_TARGET"]
     # Empty (the Server entry: the unit is skipped and writes no file), a
     # bare $VAR word expands to no argument at all; set, not just unset, so
     # PID 1 does not log about an unset variable.
     [argv] = dropin.commands()
     assert argv[-1] == "--set-credential=bluefin.prompt-root-password:1"
-    assert dropin.values("Service", "Environment") == ["BLUEFIN_INSTALL_ARGS="]
-    assert dropin.values("Service", "EnvironmentFile") == [f"-{ENV_FILE}"]
+    assert "BLUEFIN_INSTALL_ARGS=" in dropin.words("Service", "Environment")
+    assert f"-{ENV_FILE}" in dropin.values("Service", "EnvironmentFile")
     assert "bluefin-homelab-install.service" in dropin.words("Unit", "Wants")
     assert "bluefin-homelab-install.service" in dropin.words("Unit", "After")
     assert "RuntimeDirectory=bluefin-homelab-install" in UNIT.read_text(encoding="utf-8")

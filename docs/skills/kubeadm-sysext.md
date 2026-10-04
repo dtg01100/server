@@ -4,7 +4,7 @@ description: Build, ship and operate the opt-in kubeadm systemd-sysext (kubelet,
 metadata:
   type: how-to
   status: stable
-  last_updated: "2026-10-02"
+  last_updated: "2026-10-04"
 ---
 # kubeadm sysext
 
@@ -155,9 +155,10 @@ reaches the GPU Operator on the boot that activates the toolkit sysext.
 workloads. Opt-in: nothing enables it, and a worker never sees its config.
 
 - **Enable it** by linking it into `multi-user.target.wants`. Its unit exists
-  only once `systemd-sysext.service` has merged the image, after PID 1
-  applied the boot's presets, so Ignition's `enabled: true` (a preset line)
-  does not reach it. Ignition writes `/etc/extensions/kubeadm_<ver>.raw`
+  only once `systemd-sysext.service` has merged the image after
+  switch-root. Ignition's `enabled: true` (a preset line) is applied in the
+  initrd's files stage, where the image is not merged, so the unit is absent
+  and the selection is skipped on every boot. Ignition writes `/etc/extensions/kubeadm_<ver>.raw`
   (with a sha256 `verification`) and the link
   `/etc/systemd/system/multi-user.target.wants/kubeadm-init.service ->
   /usr/lib/systemd/system/kubeadm-init.service`; after the merge,
@@ -267,7 +268,7 @@ enables `nfs-client.target` and `rpcbind.socket`; `mount.nfs` starts
 NFSv3's portmapper and mountd lookups go through libtirpc, which resolves
 `tcp`/`udp` and `sunrpc` from `/etc/protocols` and `/etc/services`; without
 them `mount.nfs` fails with `Failed to find 'tcp' protocol`. Both come from
-FSDK's `components/iana-config.bst` in `os-base.bst` and are linked (tmpfiles
+`bluefin-server/iana-etc.bst` in `os-base.bst` and are linked (tmpfiles
 `L`, not copied) from the factory `/etc`, so an A/B update refreshes them.
 `/var/lib/nfs/statd` comes from tmpfiles.d, owned by `rpcuser`; on a
 diskless node it is lost at reboot, so NFSv3 servers are not notified when a

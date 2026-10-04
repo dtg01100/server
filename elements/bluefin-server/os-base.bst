@@ -12,7 +12,7 @@ depends:
 - freedesktop-sdk.bst:components/nsswitch-config.bst
 # /etc/protocols and /etc/services (IANA registries) for getprotobyname()
 # and getservbyname(); libtirpc needs them, e.g. mount.nfs for NFSv3.
-- freedesktop-sdk.bst:components/iana-config.bst
+- bluefin-server/iana-etc.bst
 - freedesktop-sdk.bst:components/bash-config.bst
 - freedesktop-sdk.bst:integration/extra-fs.bst
 - freedesktop-sdk.bst:integration/ldconfig.bst
