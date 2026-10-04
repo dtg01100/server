@@ -16,6 +16,9 @@ spec:
   privateKey:
     algorithm: ECDSA
     size: 256
+    # Keep the key across renewals and re-issues (cert-manager's default is
+    # Always since v1.18), so leaves stay valid against the CA devices trust.
+    rotationPolicy: Never
   issuerRef:
     name: selfsigned
     kind: ClusterIssuer

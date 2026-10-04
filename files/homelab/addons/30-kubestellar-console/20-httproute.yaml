@@ -2,9 +2,10 @@
 # its sign-in endpoints take the route in 11-login-gate.yaml.  Pinned to
 # the `https` listener section so the password-protected `/auth/github`
 # request never traverses the plaintext `:80` listener (it would otherwise
-# be reachable over plain HTTP and a future HTTP→HTTPS redirect would not
-# help, because basic-auth and the `kc_auth` cookie are set in cleartext
-# before any redirect fires).
+# be reachable over plain HTTP; the HTTP→HTTPS redirect in
+# 40-envoy-gateway/21-http-redirect.yaml does not help on its own, because
+# basic-auth and the `kc_auth` cookie are sent in cleartext before the
+# redirect fires).
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

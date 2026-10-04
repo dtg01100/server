@@ -284,6 +284,8 @@ def test_gateway_certificate_is_from_the_homelab_ca() -> None:
     assert ca["kind"] == "Certificate" and ca["metadata"]["namespace"] == "cert-manager"
     assert ca["spec"]["isCA"] is True
     assert ca["spec"]["issuerRef"] == {"name": "selfsigned", "kind": "ClusterIssuer"}
+    assert ca["spec"]["privateKey"]["rotationPolicy"] == "Never", \
+        "a rotated CA key would invalidate the CA devices trust"
     assert "HOMELAB_" not in str(ca), "a changed input would reissue the CA devices trust"
     assert issuer["kind"] == "ClusterIssuer" and issuer["metadata"]["name"] == "homelab-ca"
     assert issuer["spec"] == {"ca": {"secretName": ca["spec"]["secretName"]}}
