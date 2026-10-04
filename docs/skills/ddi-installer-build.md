@@ -4,7 +4,7 @@ description: Build, export, and dogfood the Bluefin Server image set (OS DDI, si
 metadata:
   type: how-to
   status: stable
-  last_updated: "2026-10-01"
+  last_updated: "2026-10-03"
   context7-sources:
     - /systemd/systemd
     - /apache/buildstream
@@ -109,6 +109,9 @@ just dogfood-install             # diskless boot, systemd-sysinstall to a blank
                                  # disk, then boot the installed disk
 just dogfood-install NEXT=<dir>  # ...then sysupdate A->B to NEXT and boot it
 just dogfood-installer           # offline USB installer: unattended install to a blank disk, boot it with and without the stick
+just dogfood-installer NEXT=<dir> # ...then failed checks on the banner, sysupdate to NEXT and boot it
+DOGFOOD_TARGET=prior-install just dogfood-installer  # ...then install again over that install and boot it
+DOGFOOD_TARGET=foreign-gpt just dogfood-installer    # install over another OS's GPT disk (also: ext4, xfs on the whole disk)
 ```
 
 `scripts/dogfood-diskless.sh <dir> [--check]` boots the way a PXE/HTTP-booted

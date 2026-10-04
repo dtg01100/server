@@ -4,7 +4,7 @@ description: Use when building or debugging the Bluefin Server boot chain, the d
 metadata:
   type: reference
   status: stable
-  last_updated: "2026-09-30"
+  last_updated: "2026-10-03"
   context7-sources:
     - /systemd/systemd
     - /apache/buildstream
@@ -135,6 +135,12 @@ first boot of the installed disk runs the initrd's `systemd-repart` (reading
 `/sysusr/usr/lib/repart.d`) to create slot B and the persistent root. The
 installed disk is identical whichever path installed it. No shell installer.
 
+Erasing a disk that is not empty needs the kernel to forget that disk's
+partition devices first (systemd-repart v261, #359; why in
+[usb-installer.md](usb-installer.md)). The USB installer does that itself. On
+a diskless node, give `systemd-sysinstall` an empty disk, or run
+`partx --delete /dev/sdX` on the target first (nothing on the disk changes).
+
 ### From the USB installer (offline)
 
 See [usb-installer.md](usb-installer.md) — the offline installer image, its
@@ -195,6 +201,9 @@ only when a newer version than the booted one is installed.
   good only after `boot-complete.target`. A good boot is one that reaches
   `multi-user.target` with no failed unit. Only sysupdate-installed UKIs are
   counted, so diskless boots never pull in `boot-complete.target`.
+  `systemd-sysupdate.service.d/30-update-status.conf` orders every update
+  check after `boot-complete.target`, so an update source that cannot be
+  reached never fails a unit before a counted boot is judged.
 - **Rollback.** systemd-boot only moves on at the *next* boot, so the preset
   also enables `bluefin-boot-deadline.timer`. It runs on boot-counted boots
   only (the `LoaderBootCountPath` EFI variable exists; never on diskless,
@@ -242,21 +251,17 @@ only when a newer version than the booted one is installed.
     someone reboots it.
 - **Opting out.** `systemctl disable --now systemd-sysupdate-reboot.timer`
   stages updates without rebooting; also disable `systemd-sysupdate.timer` to
-  stop updating. The preset is applied the first time a node boots an image
-  that ships the helper: `bluefin-update-status-migrate.service` (one-shot,
-  enabled via `multi-user.target.wants/` in `elements/oci/bluefin-server-usr.bst`)
-  runs `systemctl preset` against every `enable X` line in the latest
-  `80-bluefin-updates.preset`, then `systemctl start --no-block` so the
-  banner units populate /run/motd and /run/issue.d on that boot, gated on
-  `ConditionPathExists=!/var/lib/bluefin/update-status-migrate.stamp` so
-  the unit does not fork a shell on later boots.
-
-  On a node that booted before the helper shipped, the banner units stay
-  disabled until you run `systemctl preset
-  systemd-sysupdate.timer systemd-sysupdate-reboot.timer
-  systemd-boot-check-no-failures.service bluefin-boot-deadline.timer`
-  by hand once (the helper short-circuits on the next boot because the
-  unit will then be enabled).
+  stop updating. Presets apply on first boot only, so nodes installed before
+  this preset need `systemctl preset systemd-sysupdate.timer
+  systemd-sysupdate-reboot.timer systemd-boot-check-no-failures.service
+  bluefin-boot-deadline.timer` once. `bluefin-update-status.service` is the
+  exception: `bluefin-update-status-migrate.service` (enabled in /usr, run
+  once per installed node) enables and starts it on the first boot into an
+  image that ships it if it is not enabled yet. It never touches the update
+  timers, so an opt-out survives updates.
+- **Update health** (version, last check, staged update, last error) is on
+  the console and SSH login banners; see "Update health on the node" in
+  [systemd-sysupdate-verification.md](systemd-sysupdate-verification.md).
 
 ### Diskless and installer boots
 

@@ -15,22 +15,26 @@ description: |
   - bluefin-update-pending: `systemd-sysupdate pending`, minus a version whose
     UKI already used up its boot tries; gates the kured flag and the nightly
     reboot so a rolled-back node does not reboot into it again.
-  - bluefin-update-status-migrate, run by bluefin-update-status-migrate.service
-    (one-shot, enabled via multi-user.target.wants/ in
-    elements/oci/bluefin-server-usr.bst): reapplies the latest
-    80-bluefin-updates.preset against bluefin-update-status.service on the
-    next boot after a node sysupd-into an image where the preset added the
-    enable line; gated on the unit file existing and stamped so it never
-    runs again. (projectbluefin/server#367)
+  - bluefin-update-status, run by bluefin-update-status.service at boot and
+    after every systemd-sysupdate.service run: records the last successful
+    check and the last error in /var/lib/bluefin-update-status and writes the
+    version, update state and any error to /run/issue.d (console) and
+    /run/motd (login and SSH, through the /etc/motd link in
+    40-bluefin-motd.conf).
+  - bluefin-update-status-migrate, run once per installed node by
+    bluefin-update-status-migrate.service (enabled in /usr by
+    elements/oci/bluefin-server-usr.bst): presets apply on first boot only,
+    so a node that updated from an image without bluefin-update-status.service
+    never enables it; this enables and starts it when it is not enabled yet.
   - bluefin-sysext-fetch, run by the opt-in bluefin-sysext-fetch.service
     (disabled by 80-bluefin-opt-in.preset; the homelab Ignition templates
     link it): once per image version, installs the version-locked sysexts of
     the sysupdate features the node enabled, from the USB installer's seed
     on the ESP, the boot server (diskless) or the release
     (systemd-sysupdate), and merges them.
-  Runtime tools: bash, coreutils, curl, gpgv, bootctl, systemd-analyze,
-  systemd-sysupdate, systemd-sysext (os-base.bst) and bluefin-boot-origin
-  (boot-origin.bst).
+  Runtime tools: bash, coreutils, curl, gpgv, agetty, bootctl, journalctl,
+  systemd-analyze, systemd-sysupdate, systemd-sysext (os-base.bst) and
+  bluefin-boot-origin (boot-origin.bst).
 
 sources:
 - kind: local

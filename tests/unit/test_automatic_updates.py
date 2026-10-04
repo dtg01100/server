@@ -30,6 +30,10 @@ KURED = UNITS / "systemd-sysupdate.service.d" / "20-kured.conf"
 INTERLOCK = UNITS / "systemd-sysupdate-reboot.service.d" / "20-interlock.conf"
 MIGRATE_UNIT = UNITS / "bluefin-update-status-migrate.service"
 MIGRATE_SCRIPT = ROOT / "files" / "os" / "update-check" / "usr" / "libexec" / "bluefin-update-status-migrate"
+STATUS_HOOK = UNITS / "systemd-sysupdate.service.d" / "30-update-status.conf"
+STATUS_UNIT = UNITS / "bluefin-update-status.service"
+STATUS_SCRIPT = ROOT / "files" / "os" / "update-check" / "usr" / "libexec" / "bluefin-update-status"
+MOTD_LINK = ROOT / "files" / "os" / "tmpfiles.d" / "40-bluefin-motd.conf"
 DISKLESS_ONLY = "/run/machines/rootdisk.raw"
 
 
@@ -71,6 +75,7 @@ def test_preset_enables_the_update_timers_and_the_health_gate() -> None:
         ["enable", "systemd-sysupdate-reboot.timer"],
         ["enable", "systemd-boot-check-no-failures.service"],
         ["enable", "bluefin-boot-deadline.timer"],
+        ["enable", "bluefin-update-status.service"],
         ["enable", "bluefin-diskless-update-check.timer"],
     ]
 
@@ -91,6 +96,7 @@ def test_no_base_image_preset_enables_kubernetes_or_zfs() -> None:
 @pytest.mark.parametrize(
     "dropin",
     [
+        "bluefin-update-status.service",
         "systemd-sysupdate-reboot.service.d/10-diskless.conf",
         "systemd-sysupdate.timer.d/10-diskless.conf",
         "systemd-sysupdate-reboot.timer.d/10-diskless.conf",
@@ -191,63 +197,60 @@ def test_kured_hook_moved_into_the_unit_directory() -> None:
     assert not (ROOT / "files" / "os" / "systemd" / "systemd-sysupdate.service.d").exists()
 
 
-def test_update_status_migrate_unit_exists_and_targets_the_unit() -> None:
-    # The migration is gated by a stamp in ConditionPathExists=! so it does
-    # not fork a shell on every boot after the first; before #367 this
-    # pointed at the target unit file (the migration only fires when its
-    # target unit is present).  After #367 the unit applies every `enable X`
-    # line in 80-bluefin-updates.preset, so the gate became the stamp
-    # itself, matching the sibling bluefin-repair-etc-modes.service.
-    unit = ini(MIGRATE_UNIT)["Unit"]
-    assert unit["Description"].startswith("Enable ")
-    assert unit["ConditionPathExists"] == "!/var/lib/bluefin/update-status-migrate.stamp"
-    # agetty.service is not a real unit name; getty@.service / getty.target
-    # are, so the Before= chain targets getty.target.
-    assert "getty.target" in unit["Before"]
-    assert "agetty.service" not in unit["Before"]
-    service = ini(MIGRATE_UNIT)["Service"]
-    assert service["ExecStart"] == "/usr/libexec/bluefin-update-status-migrate"
-    install = ini(MIGRATE_UNIT)["Install"]
-    assert install["WantedBy"] == "multi-user.target"
+def test_every_update_run_refreshes_the_login_banners() -> None:
+    # A failed run stays a failed unit and also reaches the console and SSH
+    # banners; a successful one clears the error there.
+    unit = ini(STATUS_HOOK)["Unit"]
+    assert unit["OnSuccess"] == "bluefin-update-status.service"
+    assert unit["OnFailure"] == "bluefin-update-status.service"
 
 
-def test_update_status_migrate_script_is_bash_and_executable() -> None:
-    script = MIGRATE_SCRIPT
-    assert script.exists()
-    mode = script.stat().st_mode
-    assert mode & stat.S_IXUSR, "user-executable bit set"
-    head = script.read_text(encoding="utf-8").splitlines()[:1]
-    assert head == ["#!/usr/bin/bash"]
+def test_update_checks_wait_for_a_counted_boot_to_be_judged() -> None:
+    # An unreachable update source must never fail a unit before
+    # systemd-boot-check-no-failures has blessed a boot-counted image.
+    assert ini(STATUS_HOOK)["Unit"]["After"] == "boot-complete.target"
 
 
-def test_update_status_migrate_symlink_is_built_into_the_image() -> None:
-    # The unit must auto-start on every node, including ones that sysupd into
-    # the image (where presets do not re-apply); the build wires the
-    # multi-user.target.wants symlink inside elements/oci/bluefin-server-usr.bst.
-    usr = ROOT / "elements" / "oci" / "bluefin-server-usr.bst"
-    text = usr.read_text(encoding="utf-8")
-    assert "bluefin-update-status-migrate.service" in text
-    assert "/usr/lib/systemd/system/multi-user.target.wants/bluefin-update-status-migrate.service" in text
-    # The symlink is created next to bluefin-repair-etc-modes, the existing
-    # migration unit. Both are one-shot repairs that apply to nodes that
-    # booted an older image.
-    assert "bluefin-repair-etc-modes.service" in text
+def test_the_banner_unit_runs_the_status_helper_with_persistent_state() -> None:
+    service = ini(STATUS_UNIT)["Service"]
+    assert service["Type"] == "oneshot"
+    assert service["ExecStart"] == "/usr/libexec/bluefin-update-status"
+    assert service["StateDirectory"] == "bluefin-update-status"
+    assert "/var/lib/bluefin-update-status" in STATUS_SCRIPT.read_text(encoding="utf-8")
+    assert STATUS_SCRIPT.stat().st_mode & stat.S_IXUSR
+    assert ini(STATUS_UNIT)["Install"]["WantedBy"] == "multi-user.target"
 
 
-def test_update_status_migrate_runs_the_preset_and_stamps() -> None:
-    # The helper reads /usr/lib/systemd/system-preset/80-bluefin-updates.preset
-    # and applies every `enable X` line; `systemctl preset` is idempotent
-    # (no-op when the unit is already enabled or no preset has a rule), and
-    # `systemctl start --no-block` populates /run/motd and /run/issue.d on
-    # the boot that runs the migration, rather than waiting for the next
-    # systemd-sysupdate run.  The stamp gates re-entry; the unit file does
-    # not need to name a specific target unit any more.
-    # Behavioural coverage lives in tests/unit/
-    # bluefin-update-status-migrate_test.bats; this only guards the
-    # contract that the helper is what its unit declares.
-    script = MIGRATE_SCRIPT.read_text(encoding="utf-8")
-    assert "systemctl" in script
-    assert "preset" in script
-    assert "start --no-block" in script
-    assert "80-bluefin-updates.preset" in script
-    assert "/var/lib/bluefin/update-status-migrate.stamp" in script
+def test_the_banners_are_the_files_agetty_login_and_sshd_read() -> None:
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+    # agetty merges /run/issue.d with the image's /usr/lib/issue.d banner.
+    assert "/run/issue.d/40-bluefin-update.issue" in script
+    assert (ROOT / "files" / "os" / "issue.d" / "30-bluefin.issue").name < "40-bluefin-update.issue"
+    # shadow's login (MOTD_FILE /etc/motd) and sshd (UsePAM no) read only
+    # /etc/motd; it links to the runtime file, never over an operator's own.
+    assert "/run/motd" in script
+    lines = [line.split() for line in MOTD_LINK.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")]
+    assert lines == [["L", "/etc/motd", "-", "-", "-", "-", "../run/motd"]]
+
+
+def test_nodes_that_updated_into_the_banner_unit_enable_it_once() -> None:
+    # Presets apply on first boot only (#367). The migration is enabled in
+    # /usr so it runs on updated nodes, once, on installed nodes only.
+    unit = ini(MIGRATE_UNIT)
+    assert unit["Service"]["Type"] == "oneshot"
+    assert unit["Service"]["ExecStart"] == "/usr/libexec/bluefin-update-status-migrate"
+    assert values(MIGRATE_UNIT, "ConditionPathExists") == [
+        "!/var/lib/bluefin/update-status-migrate.stamp",
+        f"!{DISKLESS_ONLY}",
+    ]
+    assert unit["Unit"]["ConditionKernelCommandLine"] == "!root=tmpfs"
+    assert MIGRATE_SCRIPT.stat().st_mode & stat.S_IXUSR
+    usr = (ROOT / "elements" / "oci" / "bluefin-server-usr.bst").read_text(encoding="utf-8")
+    assert "multi-user.target.wants/bluefin-update-status-migrate.service" in usr
+
+
+def test_the_migration_never_reenables_the_update_timers() -> None:
+    # An operator who disabled the update or reboot timer keeps them off.
+    code = [line for line in MIGRATE_SCRIPT.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
+    assert "unit=bluefin-update-status.service" in code
+    assert not [line for line in code if ".timer" in line or "preset-all" in line or "system-preset" in line]

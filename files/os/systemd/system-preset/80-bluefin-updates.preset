@@ -10,6 +10,9 @@ enable systemd-sysupdate-reboot.timer
 # node, flags kured), so systemd-boot falls back after the last try.
 enable systemd-boot-check-no-failures.service
 enable bluefin-boot-deadline.timer
+# Update health on the console and SSH login banners: the running version,
+# the last successful check, a staged update and the last error.
+enable bluefin-update-status.service
 # Diskless nodes flag /run/reboot-required when their boot server offers a
 # newer release; the timer is conditioned off everywhere else.
 enable bluefin-diskless-update-check.timer

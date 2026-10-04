@@ -141,10 +141,14 @@ set-version VERSION:
 dogfood-install NEXT="" BROKEN="":
     bash scripts/dogfood-install.sh dist/diskless {{NEXT}} {{BROKEN}}
 
-# Boot the offline USB installer, install unattended to a blank disk, boot it (QEMU).
+# Boot the offline USB installer, install unattended to a blank disk, boot it, and
+# (with NEXT) prove its updates: failed checks on the banner, sysupdate to NEXT, boot
+# it (QEMU). NEXT=release checks against the image's own source (GitHub Releases).
+# DOGFOOD_TARGET=foreign-gpt|ext4|xfs|prior-install installs onto a disk that is
+# not empty (prior-install: install, then again over that install; no NEXT).
 [group('diskless')]
-dogfood-installer:
-    bash scripts/dogfood-installer.sh dist/diskless
+dogfood-installer NEXT="":
+    bash scripts/dogfood-installer.sh dist/diskless {{NEXT}}
 
 # REF=ghcr.io/<owner>/bluefin-server or <registry-host>:30500/bluefin-server
 # (PLAIN_HTTP=1); log in with podman login first. One layer per file.
