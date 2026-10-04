@@ -21,6 +21,11 @@ description: |
     version, update state and any error to /run/issue.d (console) and
     /run/motd (login and SSH, through the /etc/motd link in
     40-bluefin-motd.conf).
+  - bluefin-update-status-migrate, run once per installed node by
+    bluefin-update-status-migrate.service (enabled in /usr by
+    elements/oci/bluefin-server-usr.bst): presets apply on first boot only,
+    so a node that updated from an image without bluefin-update-status.service
+    never enables it; this enables and starts it when it is not enabled yet.
   - bluefin-sysext-fetch, run by the opt-in bluefin-sysext-fetch.service
     (disabled by 80-bluefin-opt-in.preset; the homelab Ignition templates
     link it): once per image version, installs the version-locked sysexts of

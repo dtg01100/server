@@ -28,6 +28,8 @@ ELEMENTS = ROOT / "elements" / "bluefin-server"
 DISKLESS = UNITS / "systemd-sysupdate.service.d" / "10-diskless.conf"
 KURED = UNITS / "systemd-sysupdate.service.d" / "20-kured.conf"
 INTERLOCK = UNITS / "systemd-sysupdate-reboot.service.d" / "20-interlock.conf"
+MIGRATE_UNIT = UNITS / "bluefin-update-status-migrate.service"
+MIGRATE_SCRIPT = ROOT / "files" / "os" / "update-check" / "usr" / "libexec" / "bluefin-update-status-migrate"
 STATUS_HOOK = UNITS / "systemd-sysupdate.service.d" / "30-update-status.conf"
 STATUS_UNIT = UNITS / "bluefin-update-status.service"
 STATUS_SCRIPT = ROOT / "files" / "os" / "update-check" / "usr" / "libexec" / "bluefin-update-status"
@@ -229,3 +231,26 @@ def test_the_banners_are_the_files_agetty_login_and_sshd_read() -> None:
     assert "/run/motd" in script
     lines = [line.split() for line in MOTD_LINK.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")]
     assert lines == [["L", "/etc/motd", "-", "-", "-", "-", "../run/motd"]]
+
+
+def test_nodes_that_updated_into_the_banner_unit_enable_it_once() -> None:
+    # Presets apply on first boot only (#367). The migration is enabled in
+    # /usr so it runs on updated nodes, once, on installed nodes only.
+    unit = ini(MIGRATE_UNIT)
+    assert unit["Service"]["Type"] == "oneshot"
+    assert unit["Service"]["ExecStart"] == "/usr/libexec/bluefin-update-status-migrate"
+    assert values(MIGRATE_UNIT, "ConditionPathExists") == [
+        "!/var/lib/bluefin/update-status-migrate.stamp",
+        f"!{DISKLESS_ONLY}",
+    ]
+    assert unit["Unit"]["ConditionKernelCommandLine"] == "!root=tmpfs"
+    assert MIGRATE_SCRIPT.stat().st_mode & stat.S_IXUSR
+    usr = (ROOT / "elements" / "oci" / "bluefin-server-usr.bst").read_text(encoding="utf-8")
+    assert "multi-user.target.wants/bluefin-update-status-migrate.service" in usr
+
+
+def test_the_migration_never_reenables_the_update_timers() -> None:
+    # An operator who disabled the update or reboot timer keeps them off.
+    code = [line for line in MIGRATE_SCRIPT.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
+    assert "unit=bluefin-update-status.service" in code
+    assert not [line for line in code if ".timer" in line or "preset-all" in line or "system-preset" in line]

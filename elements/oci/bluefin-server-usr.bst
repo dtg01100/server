@@ -180,6 +180,11 @@ config:
     mkdir -p /sysroot/usr/lib/systemd/system/multi-user.target.wants
     ln -sf ../bluefin-repair-etc-modes.service \
       /sysroot/usr/lib/systemd/system/multi-user.target.wants/bluefin-repair-etc-modes.service
+    # Presets apply on first boot only, so a node that updated from an image
+    # without bluefin-update-status.service never enables it; this one-shot
+    # does, once per installed node (projectbluefin/server#367).
+    ln -sf ../bluefin-update-status-migrate.service \
+      /sysroot/usr/lib/systemd/system/multi-user.target.wants/bluefin-update-status-migrate.service
 
     find /sysroot \( -type d ! -perm -1000 -o -type f \) -perm /022 -exec chmod go-w {} +
     echo "Cleared group/other write; /etc paths to repair in place: $(wc -l < "${list}")"

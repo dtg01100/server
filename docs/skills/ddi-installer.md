@@ -254,7 +254,11 @@ only when a newer version than the booted one is installed.
   stop updating. Presets apply on first boot only, so nodes installed before
   this preset need `systemctl preset systemd-sysupdate.timer
   systemd-sysupdate-reboot.timer systemd-boot-check-no-failures.service
-  bluefin-boot-deadline.timer bluefin-update-status.service` once.
+  bluefin-boot-deadline.timer` once. `bluefin-update-status.service` is the
+  exception: `bluefin-update-status-migrate.service` (enabled in /usr, run
+  once per installed node) enables and starts it on the first boot into an
+  image that ships it if it is not enabled yet. It never touches the update
+  timers, so an opt-out survives updates.
 - **Update health** (version, last check, staged update, last error) is on
   the console and SSH login banners; see "Update health on the node" in
   [systemd-sysupdate-verification.md](systemd-sysupdate-verification.md).
