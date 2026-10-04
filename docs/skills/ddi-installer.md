@@ -242,12 +242,21 @@ only when a newer version than the booted one is installed.
     someone reboots it.
 - **Opting out.** `systemctl disable --now systemd-sysupdate-reboot.timer`
   stages updates without rebooting; also disable `systemd-sysupdate.timer` to
-  stop updating. The preset reapplies itself on every node that updates into
-  a newer image: `bluefin-update-status-migrate.service` (one-shot, enabled
-  via `multi-user.target.wants/` in `elements/oci/bluefin-server-usr.bst`)
-  runs `systemctl preset` against the latest `80-bluefin-updates.preset` on
-  the next boot, gated on the target unit file existing, and stamps
-  `/var/lib/bluefin/update-status-migrate.stamp` so it never runs again.
+  stop updating. The preset is applied the first time a node boots an image
+  that ships the helper: `bluefin-update-status-migrate.service` (one-shot,
+  enabled via `multi-user.target.wants/` in `elements/oci/bluefin-server-usr.bst`)
+  runs `systemctl preset` against every `enable X` line in the latest
+  `80-bluefin-updates.preset`, then `systemctl start --no-block` so the
+  banner units populate /run/motd and /run/issue.d on that boot, gated on
+  `ConditionPathExists=!/var/lib/bluefin/update-status-migrate.stamp` so
+  the unit does not fork a shell on later boots.
+
+  On a node that booted before the helper shipped, the banner units stay
+  disabled until you run `systemctl preset
+  systemd-sysupdate.timer systemd-sysupdate-reboot.timer
+  systemd-boot-check-no-failures.service bluefin-boot-deadline.timer`
+  by hand once (the helper short-circuits on the next boot because the
+  unit will then be enabled).
 
 ### Diskless and installer boots
 

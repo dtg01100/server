@@ -192,12 +192,19 @@ def test_kured_hook_moved_into_the_unit_directory() -> None:
 
 
 def test_update_status_migrate_unit_exists_and_targets_the_unit() -> None:
-    # The migration only fires when its target unit is present, so a pre-#366
-    # image (no bluefin-update-status.service) is a no-op; a post-#366 image
-    # gets the preset reapplied on every node, even ones that sysupd-into it.
+    # The migration is gated by a stamp in ConditionPathExists=! so it does
+    # not fork a shell on every boot after the first; before #367 this
+    # pointed at the target unit file (the migration only fires when its
+    # target unit is present).  After #367 the unit applies every `enable X`
+    # line in 80-bluefin-updates.preset, so the gate became the stamp
+    # itself, matching the sibling bluefin-repair-etc-modes.service.
     unit = ini(MIGRATE_UNIT)["Unit"]
     assert unit["Description"].startswith("Enable ")
-    assert unit["ConditionPathExists"] == "/usr/lib/systemd/system/bluefin-update-status.service"
+    assert unit["ConditionPathExists"] == "!/var/lib/bluefin/update-status-migrate.stamp"
+    # agetty.service is not a real unit name; getty@.service / getty.target
+    # are, so the Before= chain targets getty.target.
+    assert "getty.target" in unit["Before"]
+    assert "agetty.service" not in unit["Before"]
     service = ini(MIGRATE_UNIT)["Service"]
     assert service["ExecStart"] == "/usr/libexec/bluefin-update-status-migrate"
     install = ini(MIGRATE_UNIT)["Install"]
@@ -228,13 +235,19 @@ def test_update_status_migrate_symlink_is_built_into_the_image() -> None:
 
 
 def test_update_status_migrate_runs_the_preset_and_stamps() -> None:
-    # The helper is idempotent: it calls `systemctl preset` and writes a
-    # stamp; a second invocation with the stamp in place does not call
-    # systemctl. Behavioural coverage lives in tests/unit/
+    # The helper reads /usr/lib/systemd/system-preset/80-bluefin-updates.preset
+    # and applies every `enable X` line; `systemctl preset` is idempotent
+    # (no-op when the unit is already enabled or no preset has a rule), and
+    # `systemctl start --no-block` populates /run/motd and /run/issue.d on
+    # the boot that runs the migration, rather than waiting for the next
+    # systemd-sysupdate run.  The stamp gates re-entry; the unit file does
+    # not need to name a specific target unit any more.
+    # Behavioural coverage lives in tests/unit/
     # bluefin-update-status-migrate_test.bats; this only guards the
     # contract that the helper is what its unit declares.
     script = MIGRATE_SCRIPT.read_text(encoding="utf-8")
     assert "systemctl" in script
     assert "preset" in script
-    assert "bluefin-update-status.service" in script
+    assert "start --no-block" in script
+    assert "80-bluefin-updates.preset" in script
     assert "/var/lib/bluefin/update-status-migrate.stamp" in script
