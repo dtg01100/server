@@ -148,9 +148,10 @@ echo "PROBE cp-console-netpol direct=$(np direct 'wget -T 10 -q -O /dev/null htt
 issue=/run/issue.d/51-kubestellar-console.issue
 echo "PROBE cp-console-issue mode=$(stat -c %a "${issue}") url=$(grep -c '^KubeStellar Console: https://kubestellar.home.arpa (user admin, password ' "${issue}") login=$(grep -cF "password ${login})" "${issue}") journal=$(journalctl -b -o cat | grep -cF "${login}")"
 # TLS: the certificate verifies against the homelab CA; port 80 redirects
-# before the login gate, so no password or cookie is taken over plain HTTP.
+# before the login gate, so no password or cookie is taken over plain HTTP,
+# and the kc_auth session cookie is Secure (never sent back over HTTP).
 sed -n 's/^[Ss]et-[Cc]ookie: kc_auth=[^;]*/kc_auth=<value>/p' "${TMPDIR:-/tmp}/ks-login" | tr -d '\r' | sed 's/^/PROBE-LOG console cookie: /'
-echo "PROBE cp-gateway-tls ready=$(kubectl -n envoy-gateway-system get certificate homelab-tls -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') verify=$(gwcurl -o /dev/null -w '%{ssl_verify_result}' https://kubestellar.home.arpa/watchdog/health) issuer=$(kubectl -n envoy-gateway-system get certificate homelab-tls -o jsonpath='{.spec.issuerRef.name}') http=$(code -u "admin:${login}" http://kubestellar.home.arpa/auth/github) location=$(gwcurl -o /dev/null -w '%{redirect_url}' http://kubestellar.home.arpa/auth/github) http-argo=$(code http://argo.home.arpa/api/v1/workflows/argo)"
+echo "PROBE cp-gateway-tls ready=$(kubectl -n envoy-gateway-system get certificate homelab-tls -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') verify=$(gwcurl -o /dev/null -w '%{ssl_verify_result}' https://kubestellar.home.arpa/watchdog/health) issuer=$(kubectl -n envoy-gateway-system get certificate homelab-tls -o jsonpath='{.spec.issuerRef.name}') http=$(code -u "admin:${login}" http://kubestellar.home.arpa/auth/github) location=$(gwcurl -o /dev/null -w '%{redirect_url}' http://kubestellar.home.arpa/auth/github) http-argo=$(code http://argo.home.arpa/api/v1/workflows/argo) secure=$(grep -i '^set-cookie: kc_auth=' "${TMPDIR:-/tmp}/ks-login" | grep -ci '; *secure')"
 # GitHub sign-in instead: dummy OAuth app files roll the Console over.
 install -d -m 0700 /etc/bluefin/homelab.d/kubestellar-console
 printf %s dummy-client-id > /etc/bluefin/homelab.d/kubestellar-console/github-client-id
@@ -244,7 +245,7 @@ check cp 'PROBE cp-argo ready=1 1 auth=auth-mode=client notoken=401 token=200$'
 check cp 'PROBE cp-mcp ready=1 notoken=401 read=ok write=refused$'
 check cp 'PROBE cp-console ready=1 sign-in=password oauth-secret=no dev-mode=0$'
 check cp 'PROBE cp-console-gate noauth=401 challenge=1 variant=401 wrong=401 manifest=401 login=307 location=https://kubestellar\.home\.arpa/auth/callback\?onboarded=true cookie=kc_auth me=200 me-nocookie=401 role=admin user=dev-user$'
-check cp 'PROBE cp-gateway-tls ready=True verify=0 issuer=homelab-ca http=301 location=https://kubestellar\.home\.arpa/auth/github http-argo=301$'
+check cp 'PROBE cp-gateway-tls ready=True verify=0 issuer=homelab-ca http=301 location=https://kubestellar\.home\.arpa/auth/github http-argo=301 secure=1$'
 check cp 'PROBE cp-console-netpol direct=blocked gateway=ok$'
 check cp 'PROBE cp-console-issue mode=600 url=1 login=1 journal=0$'
 check cp 'PROBE cp-console-oauth apply=success sign-in=github ready=1 noauth=401 login=307 github=1 warned=1 secret-logged=0$'
@@ -254,6 +255,6 @@ check node 'PROBE node-ready=True'
 for role in cp node; do check "${role}" 'PROBE failed=0'; done
 [ "${rc}" = 0 ] || exit 1
 echo "PASS: control plane from homelab-control-plane.bu applied the default homelab set (monitoring off, MetalLB without a pool); node from homelab-node.ign joined with the shown passphrase; both Ready"
-echo "PASS: homelab Gateway: add-ons over HTTPS with a certificate from the homelab CA; port 80 redirects to https before the Console login"
+echo "PASS: homelab Gateway: add-ons over HTTPS with a certificate from the homelab CA; port 80 redirects to https before the Console login; kc_auth cookie Secure"
 echo "PASS: add-ons: Argo Workflows (auth-mode=client: 401 without a token, 200 with one), MCP server (401 without a token, read ok, write refused)"
 echo "PASS: KubeStellar Console deployed without OAuth: /auth/github 401 without the login (any spelling), 307 + kc_auth with it, /api/me 200 as admin dev-user; Service unreachable from another namespace (NetworkPolicy), reachable through the Gateway; login on the console only; GitHub sign-in with OAuth files, still behind the login"

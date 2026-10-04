@@ -392,6 +392,11 @@ apply_entry() {
 		notice "${id}: managed by the kubestellar sysext's k0s manifests"
 		return 0
 	fi
+	# Add-on routes bind only to the Gateway's https listener, whose
+	# certificate (homelab-tls) comes from cert-manager; port 80 only redirects.
+	if grep -qs 'sectionName: https' "${path}"/*.yaml && ! enabled HOMELAB_CERT_MANAGER on >/dev/null; then
+		warn "${id}: HOMELAB_CERT_MANAGER=no: the Gateway's https listener has no certificate, so ${id} is unreachable"
+	fi
 	notice "${id}: applying"
 	if apply_component "${path}"; then
 		notice "${id}: ready"

@@ -119,7 +119,8 @@ Node.js ones `NODE_EXTRA_CA_CERTS`). The Gateway does not use the `acme` Cluster
 HTTP-01 needs every name reachable from the internet, which a LAN domain
 such as `home.arpa` never is, and a certificate that cannot be issued would
 leave the add-ons unreachable. `HOMELAB_CERT_MANAGER=no` does the same:
-the `https` listener has no certificate.
+the `https` listener has no certificate, and the applier warns for every
+add-on it applies behind it.
 
 **KubeStellar Console sign-in.** Without a GitHub OAuth app, the Console's
 `GET /auth/github` signs in as its built-in admin (`dev-user`; upstream

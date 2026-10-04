@@ -320,6 +320,19 @@ with_addons() {
     grep -q 'create secret generic postgres-postgresql --from-literal=postgres-password=' "${LOG}"
 }
 
+@test "add-ons behind the https listener warn without cert-manager" {
+    kubeadm_node
+    with_addons
+    run_applier
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"HOMELAB_CERT_MANAGER=no"* ]]
+    run_applier HOMELAB_CERT_MANAGER=no
+    [ "$status" -eq 0 ]
+    for id in argo-workflows mcp kubestellar-console; do
+        [[ "$output" == *"<4>${id}: HOMELAB_CERT_MANAGER=no: the Gateway's https listener has no certificate, so ${id} is unreachable"* ]]
+    done
+}
+
 @test "add-ons: nothing is applied on a node" {
     kubeadm_node
     with_addons
