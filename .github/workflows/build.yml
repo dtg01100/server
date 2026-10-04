@@ -129,10 +129,10 @@ jobs:
         run: just validate
 
   # FSDK's kernel is ~70 of the ~85 build minutes, and no upstream cache holds
-  # it (our module certificate and patch 0006 change its key). This job builds
-  # it (and Go) with the committed release module certificate and no signing
-  # secrets, and pushes the key-free artifacts to the project CAS unless a
-  # remote already holds them; every build pulls them through project.conf
+  # it (our module certificate and kernel config patches change its key). This
+  # job builds it (and Go) with the committed release module certificate and no
+  # signing secrets, and pushes the key-free artifacts to the project CAS unless
+  # a remote already holds them; every build pulls them through project.conf
   # (scripts/kernel-cache.sh).
   kernel-cache:
     needs: changes

@@ -7,7 +7,7 @@ applies.
 ## freedesktop-sdk/
 
 Applied to the freedesktop-sdk junction (`elements/freedesktop-sdk.bst`).
-Every patch that edits an FSDK element (0006) changes that element's cache
+Every patch that edits an FSDK element (0006, 0007) changes that element's cache
 key and the keys of everything that depends on it, so those artifacts come
 from the Bluefin cache or a local build, never from FSDK's cache. Keep the
 queue short.

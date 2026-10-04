@@ -267,8 +267,8 @@ version) and the NVIDIA Container Toolkit (Go); the driver sysext adds about
   sources (Go's TLS test data and others) carry 307 PEM private keys. The
   seed step is `continue-on-error`, so a failed seed only costs time.
   Measured in the lab: the seed build takes 44 min on 16+ CPUs and fills
-  15 GB. Only a kernel or Go change (FSDK bump, patch `0006`, module
-  certificate) reseeds.
+  15 GB. Only a kernel or Go change (FSDK bump, a kernel config patch such as
+  `0006` or `0007`, module certificate) reseeds.
 - **No other cache push.** `bluefin-server/keys/boot-keys.bst` imports
   `files/boot-keys/`, which on `main` holds the Secure Boot, module-signing
   and sysupdate private keys, and the image, UKIs, `kernel-modules.bst`,

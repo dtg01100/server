@@ -5,8 +5,8 @@
 #
 # The kernel is about 70 of the ~85 build minutes and no upstream cache holds
 # it: its cache key depends on the module certificate it trusts (the
-# linux-module-cert junction override) and on every patch in
-# patches/freedesktop-sdk/ (0006 kubenet, 0007 watchdog, ...).
+# linux-module-cert junction override) and on the patches in
+# patches/freedesktop-sdk/ that edit its config (0006 kubenet, 0007 watchdog).
 # Both the seed job and release builds stage the committed release
 # certificate files/release-keys/linux-module-cert.crt as
 # files/boot-keys/modules/linux-module-cert.crt, so the keys match.
