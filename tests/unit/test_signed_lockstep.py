@@ -42,18 +42,126 @@ def test_keyring_updates_with_usr_and_replaces_fsdk_vendor_key() -> None:
     assert "freedesktop-sdk.bst:components/gnupg.bst" in INITRD.read_text()
 
 
-@pytest.mark.parametrize("name,transfer", [("zfs", "30-zfs.transfer"), ("kubestellar", "31-kubestellar.transfer"), ("kubeadm", "32-kubeadm.transfer"), ("homelab", "35-homelab.transfer"), ("argo-workflows", "36-argo-workflows.transfer"), ("mcp", "37-mcp.transfer"), ("nvidia-open-595", "33-nvidia-open-595.transfer")])
-def test_version_locked_sysexts_are_optional_features(name: str, transfer: str) -> None:
+def _feature_names() -> list[str]:
+    """Return the stem of every ``*.feature`` file, failing loudly if none exist.
+
+    An empty or missing ``sysupdate.d`` would otherwise collapse every
+    parametrized test below into a silent skip.
+    """
+    names = sorted(p.stem for p in SYSUPDATE.glob("*.feature"))
+    if not names:
+        raise AssertionError(f"no *.feature files found under {SYSUPDATE}")
+    return names
+
+
+def _transfers_by_feature() -> dict[str, list[str]]:
+    """Map each feature named in a ``[Transfer] Features=`` key to its transfers.
+
+    ``Features=`` is a whitespace-separated list (systemd-sysupdate and
+    ``bluefin-sysext-fetch`` both split it), so one transfer may serve
+    several features.
+    """
+    by_feature: dict[str, list[str]] = {}
+    for path in sorted(SYSUPDATE.glob("*.transfer")):
+        for feature in ini(path)["Transfer"].get("Features", "").split():
+            by_feature.setdefault(feature, []).append(path.name)
+    return by_feature
+
+
+def _feature_transfer_pairs() -> list[tuple[str, str | None]]:
+    """Return ``(name, transfer_filename)`` for every optional sysupdate feature.
+
+    ``updatectl features`` (and the D-Bus ``org.freedesktop.sysupdate1``
+    interface it fronts) discovers features from ``*.feature`` files and the
+    transfers each one enables from the ``Features=`` key inside
+    ``[Transfer]``. Drift between the two sides silently breaks
+    ``updatectl enable <feature>`` and the boot-time feature fetch, so the
+    pair list is derived from disk rather than maintained by hand. A feature
+    with no transfer is paired with ``None`` so the test fails for it.
+    """
+    by_feature = _transfers_by_feature()
+    return [
+        (name, transfer)
+        for name in _feature_names()
+        for transfer in by_feature.get(name) or [None]
+    ]
+
+
+@pytest.mark.parametrize("name,transfer", _feature_transfer_pairs())
+def test_version_locked_sysexts_are_optional_features(name: str, transfer: str | None) -> None:
+    assert transfer is not None, f"{name}.feature has no transfer naming it in Features="
     feature = ini(SYSUPDATE / f"{name}.feature")["Feature"]
-    assert feature.get("Enabled", "false") == "false", "features are opt-in"
+    assert feature.get("Enabled", "false").lower() in {"", "false", "no", "0"}, (
+        f"{name}.feature carries Enabled={feature.get('Enabled')!r}; "
+        "opt-in features must default to Enabled=false so the homelab "
+        "Ignition templates can flip them on per node"
+    )
     t = ini(SYSUPDATE / transfer)
-    assert t["Transfer"]["Features"] == name
+    assert name in t["Transfer"]["Features"].split()
     assert t["Transfer"]["ProtectVersion"] == "%A"
     assert t["Target"]["Path"] == "/var/lib/extensions"
     assert t["Target"]["MatchPattern"] == f"{name}_@v.raw"
 
 
-@pytest.mark.parametrize("element,name", [("zfs-sysext.bst", "zfs"), ("kubestellar-sysext.bst", "kubestellar"), ("kubeadm-sysext.bst", "kubeadm"), ("homelab-sysext.bst", "homelab"), ("argo-workflows-sysext.bst", "argo-workflows"), ("mcp-sysext.bst", "mcp"), ("nvidia-open-595-sysext.bst", "nvidia-open-595")])
+@pytest.mark.parametrize("name", _feature_names())
+def test_sysupdate_feature_definition_parses(name: str) -> None:
+    """Every ``*.feature`` file must parse as a valid ``[Feature]`` section.
+
+    ``systemd-sysupdate`` (and sysupdated's ``DescribeFeature``, since v257) accept
+    ``Description=``, ``Documentation=`` and ``AppStream=``; unknown keys are
+    silently dropped with a parse warning. A missing ``[Feature]`` section
+    makes ``updatectl features`` print the feature with empty fields instead
+    of refusing to list it, so we assert the shape explicitly.
+    """
+    parser = ini(SYSUPDATE / f"{name}.feature")
+    assert "Feature" in parser, (
+        f"{name}.feature is missing the [Feature] section; updatectl will "
+        "list it but every field will be empty"
+    )
+    section = parser["Feature"]
+    assert section.get("Description", "").strip(), (
+        f"{name}.feature has no Description=; the updatectl features table "
+        "falls back to an empty column"
+    )
+    doc = section.get("Documentation", "").strip()
+    assert doc.startswith("https://") and doc.removeprefix("https://").strip(), (
+        f"{name}.feature Documentation={doc!r} must be an https:// URL; "
+        "systemd-sysupdate's config_parse_url_specifiers silently drops "
+        "anything that fails http_url_is_valid()"
+    )
+
+
+def test_no_sysupdate_feature_or_transfer_is_orphaned() -> None:
+    """Each ``*.feature`` file pairs with exactly one ``*.transfer``.
+
+    systemd-sysupdate itself allows several transfers per feature; the
+    one-transfer rule is this repo's convention (one sysext per feature).
+
+    ``updatectl features`` reads feature definitions; ``systemd-sysupdate
+    update`` looks up the transfer that installs each enabled feature's
+    sysext. Either side missing its counterpart leaves the feature silent:
+    a feature without a transfer never stages anything, and a transfer
+    that names a feature that doesn't exist errors out with
+    "Optional feature not found".
+    """
+    features = set(_feature_names())
+    transfers_by_feature = _transfers_by_feature()
+
+    referenced = set(transfers_by_feature)
+    assert features == referenced, (
+        f"feature/transfer pairs drift: features without a transfer "
+        f"{sorted(features - referenced)}; transfers referencing a missing "
+        f"feature {sorted(referenced - features)}"
+    )
+
+    duplicates = {name: names for name, names in transfers_by_feature.items() if len(names) > 1}
+    assert not duplicates, (
+        f"repo convention: each feature ships exactly one sysext transfer "
+        f"(MatchPattern <feature>_@v.raw); found several for {duplicates}"
+    )
+
+
+@pytest.mark.parametrize("element,name", [(f"{name}-sysext.bst", name) for name in _feature_names()])
 def test_extension_release_name_carries_the_image_version(element: str, name: str) -> None:
     text = (ROOT / "elements" / "oci" / element).read_text(encoding="utf-8")
     assert f'sysext-release: "{name}_%{{image-version}}"' in text
