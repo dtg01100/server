@@ -366,6 +366,12 @@ apply_component() {
 			apply_secrets "${dir}" || return 1
 			secrets_done=1
 		fi
+		# The Gateway's certificate lives in envoy-gateway-system, which
+		# only envoy-gateway creates.
+		if [ "$(basename "${file}")" = 23-gateway-cert.yaml ] && ! enabled HOMELAB_ENVOY_GATEWAY on; then
+			notice "${COMPONENT}: skipping 23-gateway-cert.yaml: HOMELAB_ENVOY_GATEWAY=no"
+			continue
+		fi
 		apply_file "${file}" || return 1
 	done
 	[ -n "${secrets_done}" ] || apply_secrets "${dir}"

@@ -197,6 +197,18 @@ EOF
     [[ "$output" == *"argocd: skipping 20-root-app.yaml: HOMELAB_ARGOCD_ROOT_REPO not set"* ]]
 }
 
+@test "without envoy-gateway, cert-manager skips the Gateway's certificate" {
+    kubeadm_node
+    run_applier
+    ls "${APPLIED}"/*-23-gateway-cert.yaml
+    rm -f "${APPLIED}"/*
+    run_applier HOMELAB_ENVOY_GATEWAY=no
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"cert-manager: skipping 23-gateway-cert.yaml: HOMELAB_ENVOY_GATEWAY=no"* ]]
+    [[ "$output" == *"cert-manager: ready"* ]]
+    ! ls "${APPLIED}"/*-23-gateway-cert.yaml
+}
+
 @test "configured inputs are validated and substituted" {
     kubeadm_node
     run_applier HOMELAB_METALLB_ADDRESSES="192.0.2.240-192.0.2.250, 198.51.100.0/28" \
