@@ -19,6 +19,8 @@ BuildStream source ref.
   nvidia-container-toolkit
                    include/nvidia-container-toolkit.yml     the release tag's commit   nvidia-container-toolkit-
                    nvidia-container-toolkit-version                                    commit in the same include
+  iana-etc         elements/bluefin-server/iana-etc.bst     iana-etc-<date>.tar.gz     ref: in the same element
+                   iana-etc-version
 
 The .bst pins cover every architecture the element fetches: the top-level
 amd64 sources and the arm64 ones under `(?): arch == "aarch64"`. Every
@@ -30,14 +32,17 @@ x86_64 only, and its sha256 is an atom next to its version, which the
 element's `ref:` reads. The NVIDIA Container Toolkit is built from source
 fetched with git, and NVIDIA publishes no checksum for any archive of it, so
 its pin is the release tag's commit instead of a sha256
-(GitTagComponent).
+(GitTagComponent). iana-etc (/etc/protocols and /etc/services) is a data
+snapshot tagged with its date, so it has no series: every newer release is
+proposed (SnapshotComponent).
 
 check   Newest release of each component inside its pinned MAJOR.MINOR series:
         Kubernetes from dl.k8s.io/release/stable-X.Y.txt, an NVIDIA driver
         flavour from the directory index at
         download.nvidia.com/XFree86/Linux-x86_64/ (its series is its driver
         branch; a newer release counts once its .run and .run.sha256sum both
-        answer a HEAD request), the rest from the project's GitHub releases.
+        answer a HEAD request), the rest from the project's GitHub releases
+        (iana-etc: the newest date tag, whatever the series).
         Drafts, prereleases and releases that lack the pinned assets do not
         count.
 apply   Moves one component to a version (default: the newest in its series)
@@ -303,6 +308,8 @@ class Component:
     sums: str
     stable_channel = ""
     version_re = r"(\d+\.\d+\.\d+)"
+    # A GitHub release tag is this prefix plus the version.
+    tag_prefix = "v"
     # How to go past the pinned series, for the pull request body.
     beyond_series = "a minor bump is a manual `.github/scripts/track-binaries.py apply {name} --version ...`."
 
@@ -330,9 +337,9 @@ class Component:
         prefix = f"https://github.com/{self.repo}/releases/download/"
         for release in _github_releases(self.repo):
             tag = release.get("tag_name", "")
-            if release.get("draft") or release.get("prerelease") or not tag.startswith("v"):
+            if release.get("draft") or release.get("prerelease") or not tag.startswith(self.tag_prefix):
                 continue
-            version = tag[1:]
+            version = tag[len(self.tag_prefix):]
             if not re.fullmatch(self.version_re, version) or self.series(version) != series:
                 continue
             # The pinned assets must be attached already: a release can be
@@ -358,7 +365,18 @@ class Component:
         return self.sums.format(url=url, dir=url.rsplit("/", 1)[0], version=version)
 
     def notes(self, version: str) -> str:
-        return f"https://github.com/{self.repo}/releases/tag/{urllib.parse.quote('v' + version)}"
+        return f"https://github.com/{self.repo}/releases/tag/{urllib.parse.quote(self.tag_prefix + version)}"
+
+    def headline(self, old: str, new: str) -> str:
+        """First line of the pull request body."""
+        series = self.series(new)
+        if self.series(old) == series:
+            return f"Patch release of **{self.name}** in the pinned `{series}` series: `{old}` → `{new}`."
+        return f"Moves **{self.name}** from `{old}` to `{new}`, a series change."
+
+    def policy(self) -> str:
+        """What the tracker proposes on its own, for the pull request body."""
+        return f"Only patch releases inside the pinned series are proposed; {self.beyond_series.format(name=self.name)}"
 
     # What a pin holds, for the pull request body.
     pin_label = "sha256"
@@ -496,6 +514,32 @@ class NvidiaDriverComponent(BstComponent):
 
     def notes(self, version):
         return f"{self.INDEX}{version}/"
+
+
+class SnapshotComponent(BstComponent):
+    """A data snapshot released under its date (YYYYMMDD tag, no "v"), not a semantic version.
+
+    The version atom and the tarball's sha256 live in the element itself.
+    There is no series to stay inside: every newer release with its tarball
+    and checksum file attached is a candidate, and `apply` takes the newest.
+    """
+
+    multi_arch = False
+    tag_prefix = ""
+
+    def __init__(self, name: str, repo: str, sums: str, element: str):
+        variable = f"{name}-version"
+        super().__init__(name, repo, sums, include=element, variables=(variable,), element=element,
+                         marker=f"%{{{variable}}}", version_re=r"(\d{8})")
+
+    def series(self, version):
+        return "date"
+
+    def headline(self, old, new):
+        return f"New **{self.name}** snapshot: `{old}` → `{new}`."
+
+    def policy(self):
+        return f"Every newer {self.name} snapshot is proposed; there is no series to stay inside."
 
 
 class GitTagComponent(Component):
@@ -663,6 +707,8 @@ COMPONENTS: dict[str, Component] = {
                      element="elements/k0s/k0s-bin.bst", marker="%{k0s-upstream-tag}",
                      version_re=r"(\d+\.\d+\.\d+)\+k0s\.(\d+)", version_fmt="{0}+k0s.{1}"),
         NvidiaDriverComponent("nvidia-open-595"),
+        SnapshotComponent("iana-etc", "Mic92/iana-etc", "{url}.sha256",
+                          element="elements/bluefin-server/iana-etc.bst"),
         GitTagComponent("nvidia-container-toolkit", "NVIDIA/nvidia-container-toolkit",
                         include="include/nvidia-container-toolkit.yml",
                         element="elements/nvidia/nvidia-container-toolkit.bst"),
@@ -761,12 +807,7 @@ def apply(root: Path, name: str, version: str | None = None) -> Result | None:
 
 def summary(result: Result) -> str:
     component, old, new = result.component, result.old, result.new
-    series = component.series(new)
-    if component.series(old) == series:
-        head = f"Patch release of **{component.name}** in the pinned `{series}` series: `{old}` → `{new}`."
-    else:
-        head = f"Moves **{component.name}** from `{old}` to `{new}`, a series change."
-    lines = [head, "", f"Release notes: {component.notes(new)}", "", f"| File | Asset | {component.pin_label} |", "| --- | --- | --- |"]
+    lines = [component.headline(old, new), "", f"Release notes: {component.notes(new)}", "", f"| File | Asset | {component.pin_label} |", "| --- | --- | --- |"]
     for pin, before, after in result.changes:
         was = "unchanged" if before == after else f"was `{before}`"
         lines.append(f"| `{pin.path}` | [`{pin.asset}`]({pin.url}) | `{after}` ({was}) |")
@@ -776,7 +817,7 @@ def summary(result: Result) -> str:
         lines += [f"- `{mention}`" for mention in result.mentions]
     lines += [
         "",
-        f"Only patch releases inside the pinned series are proposed; {component.beyond_series.format(name=component.name)}",
+        component.policy(),
         "The tracker regenerates this branch from `main`, so push fixes to a branch",
         "of your own.",
     ]

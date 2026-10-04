@@ -903,3 +903,112 @@ def test_real_toolkit_element_pins_the_include_atoms():
     (pin,) = component.pins(tree)
     assert (pin.path, pin.key, pin.url) == ("include/nvidia-container-toolkit.yml", "nvidia-container-toolkit-commit", CTK_GIT)
     assert pin.sums == f"https://api.github.com/repos/{CTK_REPO}/commits/refs/tags/v{component.current(tree)}"
+
+
+IANA_REPO = "Mic92/iana-etc"
+IANA_ELEMENT = "elements/bluefin-server/iana-etc.bst"
+IANA_OLD = sha(b"iana-etc-20260911")
+
+
+def iana_url(version: str) -> str:
+    return f"https://github.com/{IANA_REPO}/releases/download/{version}/iana-etc-{version}.tar.gz"
+
+
+def iana(version: str, *, sums: bool = True) -> dict:
+    name = f"iana-etc-{version}.tar.gz"
+    return release(version, name, *([f"{name}.sha256"] if sums else []))
+
+
+@pytest.fixture
+def iana_etc(repo, upstream, monkeypatch):
+    (repo / IANA_ELEMENT).parent.mkdir(parents=True, exist_ok=True)
+    (repo / IANA_ELEMENT).write_text(f"""kind: manual
+
+variables:
+  # Mic92/iana-etc release tag (YYYYMMDD).
+  iana-etc-version: "20260911"
+  strip-binaries: ''
+
+sources:
+- kind: tar
+  url: github:{IANA_REPO}/releases/download/%{{iana-etc-version}}/iana-etc-%{{iana-etc-version}}.tar.gz
+  ref: {IANA_OLD}
+""", encoding="utf-8")
+    monkeypatch.setattr(track, "COMPONENTS", {"iana-etc": track.COMPONENTS["iana-etc"]})
+    return upstream
+
+
+def test_iana_etc_proposes_the_newest_dated_snapshot_with_its_assets(repo, iana_etc):
+    iana_etc.releases(IANA_REPO, [
+        # Tagged, but the tarball is not attached (yet): not a candidate.
+        release("20261007"),
+        iana("20261001", sums=False),
+        {**iana("20260930"), "prerelease": True},
+        {**iana("20260929"), "draft": True},
+        iana("20260920"),
+        release("untagged-d4eaed72f8799fc3c9a0", "iana-etc-x.tar.gz"),
+        iana("20260911"),
+        iana("20190716"),
+    ])
+    assert newest("iana-etc", repo) == "20260920"
+
+
+def test_iana_etc_with_no_newer_snapshot_is_current(repo, iana_etc, capsys):
+    iana_etc.releases(IANA_REPO, [iana("20260911"), iana("20260904")])
+    assert track.main(["check", "--json"], root=repo) == 0
+    out, err = capsys.readouterr()
+    assert json.loads(out) == []
+    assert "iana-etc     date   20260911       20260911       current" in err
+
+
+def test_iana_etc_apply_moves_the_date_and_the_ref_together(repo, iana_etc, tmp_path, capsys):
+    iana_etc.releases(IANA_REPO, [iana("20260930"), iana("20260911")])
+    new = iana_etc.asset(iana_url("20260930"))
+    # Mic92 publishes a bare digest next to the tarball.
+    iana_etc.files[iana_url("20260930") + ".sha256"] = new.encode()
+    before = snapshot(repo, [IANA_ELEMENT])
+    body = tmp_path / "body.md"
+
+    assert track.main(["apply", "iana-etc", "--summary", str(body)], root=repo) == 0
+
+    assert changed_lines(before, repo) == {
+        IANA_ELEMENT: [
+            ('  iana-etc-version: "20260911"', '  iana-etc-version: "20260930"'),
+            (f"  ref: {IANA_OLD}", f"  ref: {new}"),
+        ],
+    }
+    assert capsys.readouterr().out.split() == [IANA_ELEMENT]
+    text = body.read_text()
+    assert "New **iana-etc** snapshot: `20260911` → `20260930`." in text
+    assert "https://github.com/Mic92/iana-etc/releases/tag/20260930" in text
+    assert f"- {iana_url('20260930')}.sha256" in text
+    assert "Every newer iana-etc snapshot is proposed" in text
+    assert "series" not in text.split("\n", 1)[0]
+
+
+def test_iana_etc_tampered_tarball_writes_nothing(repo, iana_etc, capsys):
+    iana_etc.releases(IANA_REPO, [iana("20260930")])
+    iana_etc.asset(iana_url("20260930"), iana_url("20260930") + ".sha256")
+    iana_etc.files[iana_url("20260930")] = b"tampered"
+    before = snapshot(repo, [IANA_ELEMENT])
+
+    assert track.main(["apply", "iana-etc"], root=repo) == 1
+
+    assert snapshot(repo, [IANA_ELEMENT]) == before
+    assert f"{iana_url('20260930')} hashes to {sha(b'tampered')}" in capsys.readouterr().err
+
+
+def test_iana_etc_refuses_a_version_that_is_not_a_date(repo, iana_etc):
+    with pytest.raises(track.TrackError, match=r"`v1.0` does not match"):
+        track.apply(repo, "iana-etc", "v1.0")
+    assert iana_etc.requests == []
+
+
+def test_real_iana_etc_element_pins_its_tarball_in_the_element():
+    tree = track.Tree(ROOT)
+    component = track.COMPONENTS["iana-etc"]
+    (pin,) = component.pins(tree)
+    version = component.current(tree)
+    assert (pin.path, pin.key) == (IANA_ELEMENT, "ref")
+    assert pin.url == iana_url(version)
+    assert pin.sums == iana_url(version) + ".sha256"

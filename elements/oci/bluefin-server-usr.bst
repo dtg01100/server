@@ -94,7 +94,7 @@ config:
     # and a disk install keeps /etc across A/B updates, so a copy would stay
     # at the version the node first booted; a link follows /usr. An operator
     # can still replace the link with a file, which L leaves alone.
-    # protocols, services: IANA registries (components/iana-config.bst).
+    # protocols, services: IANA registries (bluefin-server/iana-etc.bst).
     linked='protocols services'
     for entry in ${linked}; do
       test -f "${factory}/${entry}"

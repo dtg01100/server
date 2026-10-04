@@ -3,7 +3,9 @@
 glibc's getprotobyname()/getservbyname() read them through the "files" NSS
 module, and libtirpc needs "tcp"/"udp" and "sunrpc" to reach a portmapper:
 without them mount.nfs fails every NFSv3 mount with "Failed to find 'tcp'
-protocol". FSDK 26.08 ships both in components/iana-config.bst.
+protocol". bluefin-server/iana-etc.bst installs both from a dated IANA
+snapshot (Mic92/iana-etc), not FSDK's components/iana-config.bst, which is
+stuck at 2019-07-16 (#318).
 
 /etc holds no image content: oci/bluefin-server-usr.bst moves the staged /etc
 into /usr/share/factory/etc and generates one tmpfiles.d line per entry. These
@@ -21,7 +23,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 OS_BASE = ROOT / "elements" / "bluefin-server" / "os-base.bst"
 USR = ROOT / "elements" / "oci" / "bluefin-server-usr.bst"
-COMPONENT = "freedesktop-sdk.bst:components/iana-config.bst"
+ELEMENT = ROOT / "elements" / "bluefin-server" / "iana-etc.bst"
+COMPONENT = "bluefin-server/iana-etc.bst"
 CONF = "usr/lib/tmpfiles.d/00-bluefin-factory-etc.conf"
 
 
@@ -47,20 +50,31 @@ def fake_sysroot(tmp_path: Path, etc_files: tuple[str, ...]) -> Path:
     return sysroot
 
 
-def test_iana_config_is_in_the_base_stack() -> None:
+def test_iana_etc_is_in_the_base_stack() -> None:
     depends = yaml.safe_load(OS_BASE.read_text(encoding="utf-8"))["depends"]
     assert COMPONENT in depends
+    # Only one element may install /etc/protocols and /etc/services.
+    assert not [d for d in depends if "iana-config" in d]
     for sysext in (ROOT / "elements").rglob("*sysext*.bst"):
-        assert "iana-config" not in sysext.read_text(encoding="utf-8"), sysext
+        text = sysext.read_text(encoding="utf-8")
+        assert "iana-config" not in text and "iana-etc" not in text, sysext
 
 
-def test_fsdk_element_installs_both_files_into_etc() -> None:
-    fsdk = next((ROOT / ".bst" / "staged-junctions").glob(
-        "freedesktop-sdk.bst/*/elements/components/iana-config.bst"), None)
-    if fsdk is None:
-        pytest.skip("freedesktop-sdk junction not staged (run just validate)")
-    install = "\n".join(yaml.safe_load(fsdk.read_text(encoding="utf-8"))["config"]["install-commands"])
+def test_element_installs_both_files_into_etc() -> None:
+    install = "\n".join(yaml.safe_load(ELEMENT.read_text(encoding="utf-8"))["config"]["install-commands"])
     assert '"%{install-root}%{sysconfdir}" protocols services' in install
+
+
+def test_snapshot_is_pinned_by_date_and_sha256() -> None:
+    element = yaml.safe_load(ELEMENT.read_text(encoding="utf-8"))
+    version = element["variables"]["iana-etc-version"]
+    assert len(version) == 8 and version.isdigit(), version
+    # Newer than FSDK's 2019-07-16 snapshot, which this element replaces.
+    assert version > "20190716"
+    (source,) = element["sources"]
+    assert source["kind"] == "tar"
+    assert source["url"] == "github:Mic92/iana-etc/releases/download/%{iana-etc-version}/iana-etc-%{iana-etc-version}.tar.gz"
+    assert len(source["ref"]) == 64 and int(source["ref"], 16) >= 0
 
 
 def test_protocols_and_services_are_linked_like_other_read_only_defaults(tmp_path: Path) -> None:
