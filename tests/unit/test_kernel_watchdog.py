@@ -51,10 +51,7 @@ def test_patch_targets_fsdk_linux_config_script() -> None:
 def test_patch_appends_after_the_existing_tail() -> None:
     """0006 owns the last line of fdsdk-config.sh after it lands
     (`module NETFILTER_XT_TARGET_NOTRACK`); 0007 reproduces it as hunk
-    context and adds the watchdog block below.  The earlier version used
-    the same `@@ -2810,3 +2810,17 @@` header as 0006, which produced no
-    trailing context lines and broke `git apply` after 0006 — see
-    test_patch_applies_after_0006 for the regression guard.
+    context and adds the watchdog block below.
     """
     text = KERNEL_PATCH.read_text()
     assert " module NETFILTER_XT_TARGET_NOTRACK" in text
@@ -64,9 +61,7 @@ def test_patch_appends_after_the_existing_tail() -> None:
 def test_patch_applies_after_0006() -> None:
     """0007's hunk context must reproduce 0006's tail so patch_queue can
     stack them in lexical order without the second hunk failing with
-    "corrupt patch".  Issue #377 (this PR) initially used the same
-    `@@ -2810,3 +2810,17 @@` header as 0006, which produced no trailing
-    context lines and made the kernel build fail at source staging.
+    "corrupt patch", and without relying on git apply's offset tolerance.
     """
     import subprocess
     import tempfile
@@ -119,14 +114,12 @@ def test_patch_applies_after_0006() -> None:
 @pytest.mark.parametrize(
     "option",
     [
-        # Watchdog core must be enabled (not module): /dev/watchdog is the
-        # user-facing API for systemd RuntimeWatchdogSec= and friends, and
-        # userspace (ipmi-watchdog, the watchdog daemon) opens it on every
-        # server image regardless of whether a hardware watchdog is bound.
+        # Watchdog core is built in.  /dev/watchdog only appears once a
+        # driver registers the first watchdog device; systemd's
+        # RuntimeWatchdogSec= is a no-op until then.
         "WATCHDOG",
         "WATCHDOG_CORE",
-        # Common x86 server watchdog drivers, as modules so they only load
-        # on hardware that actually exposes them (guarded by `case "$arch"
+        # Common x86 server watchdog drivers, as modules (guarded by `case "$arch"
         # in x86_64)` because the Kconfig symbols are x86-only and FSDK's
         # `module()` script appends them to expected-configs; an aarch64
         # kernel build would otherwise fail "Missing XYZ" at olddefconfig).
@@ -135,7 +128,7 @@ def test_patch_applies_after_0006() -> None:
         "SP5100_TCO",       # AMD SP5100/AM79C974 TCO watchdog (AMD servers).
         "IT87_WDT",         # IT87xx Super-I/O watchdog (older motherboards).
         "W83627HF_WDT",     # W83627HF + NCT6775/6776/6779/6791/6792 Super-I/O watchdog.
-        "SOFT_WATCHDOG",    # Software watchdog: always-available fallback.
+        "SOFT_WATCHDOG",    # Software watchdog: opt-in fallback (no modalias, not autoloaded).
         "IPMI_WATCHDOG",    # BMC watchdog (Intel/AMI IPMI 2.0 compliant BMCs).
     ],
 )
@@ -148,13 +141,16 @@ def test_watchdog_options_are_added(option: str) -> None:
 def test_core_options_are_built_in_not_modules() -> None:
     """WATCHDOG and WATCHDOG_CORE must be `enable`d (built-in), not modules.
 
-    Otherwise /dev/watchdog is only present when something has loaded the
-    module, which systemd does not do on its own.
+    Built in, the core needs no module load before a driver can register.
+    /dev/watchdog itself only appears once a driver registers the first
+    watchdog device: i6300esb / iTCO_wdt / sp5100_tco autoload via
+    modalias, while it87_wdt / w83627hf_wdt / ipmi_watchdog / softdog must
+    be loaded explicitly.
     """
     assert _line_begins_with("enable WATCHDOG")
     assert _line_begins_with("enable WATCHDOG_CORE")
     # And conversely, the specific drivers are modules, not built-in: a node
-    # that lacks the hardware must not bind a stale watchdog at boot.
+    # that lacks the hardware does not carry the driver in the kernel image.
     assert _line_begins_with("module I6300ESB_WDT")
     assert _line_begins_with("module ITCO_WDT")
     assert _line_begins_with("module SP5100_TCO")
