@@ -22,12 +22,24 @@ BUILD_MODES_TEST = ROOT / "tests" / "unit" / "test_build_modes.py"
 
 
 def _added_lines() -> list[str]:
-    """Return the lines this patch inserts, with the leading '+' stripped."""
+    """Return the lines this patch inserts, with the leading '+' stripped
+    but original indentation preserved.  Callers should use
+    `_line_begins_with` for substring matching — `module XYZ` may sit
+    inside a `case` block with leading whitespace and a trailing comment.
+    """
     return [
         line[1:]
         for line in KERNEL_PATCH.read_text().splitlines()
         if line.startswith("+") and not line.startswith("+++")
     ]
+
+
+def _line_begins_with(token: str) -> bool:
+    """True iff any inserted line starts with `token` (ignoring leading
+    whitespace).  Used so `module XYZ` matches both top-level inserts and
+    the same driver nested inside an `arch == x86_64` case block.
+    """
+    return any(line.lstrip().startswith(token) for line in _added_lines())
 
 
 def test_patch_targets_fsdk_linux_config_script() -> None:
@@ -37,10 +49,71 @@ def test_patch_targets_fsdk_linux_config_script() -> None:
 
 
 def test_patch_appends_after_the_existing_tail() -> None:
-    """0006 owns the last 3 lines of fdsdk-config.sh; 0007 appends below it."""
+    """0006 owns the last line of fdsdk-config.sh after it lands
+    (`module NETFILTER_XT_TARGET_NOTRACK`); 0007 reproduces it as hunk
+    context and adds the watchdog block below.  The earlier version used
+    the same `@@ -2810,3 +2810,17 @@` header as 0006, which produced no
+    trailing context lines and broke `git apply` after 0006 — see
+    test_patch_applies_after_0006 for the regression guard.
+    """
     text = KERNEL_PATCH.read_text()
-    assert "    enable TRANSPARENT_HUGEPAGE" in text
-    assert " fi" in text
+    assert " module NETFILTER_XT_TARGET_NOTRACK" in text
+    assert " enable INET_DIAG_DESTROY" in text
+
+
+def test_patch_applies_after_0006() -> None:
+    """0007's hunk context must reproduce 0006's tail so patch_queue can
+    stack them in lexical order without the second hunk failing with
+    "corrupt patch".  Issue #377 (this PR) initially used the same
+    `@@ -2810,3 +2810,17 @@` header as 0006, which produced no trailing
+    context lines and made the kernel build fail at source staging.
+    """
+    import subprocess
+    import tempfile
+
+    # Build a synthetic fdsdk-config.sh: 2809 filler lines + the original
+    # 3-line EOF block (matching 0006's pre-context).  Apply 0006, then
+    # `git apply --check` 0007 against the modified tree — exactly what
+    # bst-plugins-community's `patch_queue.stage` does.
+    body = "\n".join(f"line {i}" for i in range(1, 2810)) + (
+        "\nif has HAVE_ARCH_TRANSPARENT_HUGEPAGE; then\n"
+        "    enable TRANSPARENT_HUGEPAGE\n"
+        "fi\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = Path(tmp) / "fsdk"
+        tree.mkdir()
+        (tree / "files" / "linux").mkdir(parents=True)
+        (tree / "files" / "linux" / "fdsdk-config.sh").write_text(body)
+        subprocess.run(["git", "init", "-q"], cwd=tree, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=tree, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=test@example.com",
+             "-c", "user.name=test", "commit", "-q", "-m", "base"],
+            cwd=tree, check=True,
+        )
+        patch6 = ROOT / "patches" / "freedesktop-sdk" / (
+            "0006-linux-kubernetes-cilium-networking.patch"
+        )
+        patch7 = ROOT / "patches" / "freedesktop-sdk" / (
+            "0007-linux-watchdog.patch"
+        )
+        result = subprocess.run(
+            ["git", "apply", str(patch6)],
+            cwd=tree, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"0006 does not apply on the synthetic tree:\n{result.stderr}"
+        )
+        result = subprocess.run(
+            ["git", "apply", "--check", str(patch7)],
+            cwd=tree, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            "0007 does not apply on top of 0006 — the second hunk in the\n"
+            "patch_queue stack fails, which makes the entire kernel build\n"
+            f"fail at source staging.  stderr:\n{result.stderr}"
+        )
 
 
 @pytest.mark.parametrize(
@@ -53,19 +126,23 @@ def test_patch_appends_after_the_existing_tail() -> None:
         "WATCHDOG",
         "WATCHDOG_CORE",
         # Common x86 server watchdog drivers, as modules so they only load
-        # on hardware that actually exposes them.
+        # on hardware that actually exposes them (guarded by `case "$arch"
+        # in x86_64)` because the Kconfig symbols are x86-only and FSDK's
+        # `module()` script appends them to expected-configs; an aarch64
+        # kernel build would otherwise fail "Missing XYZ" at olddefconfig).
         "I6300ESB_WDT",     # Intel 6300ESB PCI watchdog (older servers).
         "ITCO_WDT",         # Intel ICH/PCH TCO watchdog (most x86 boards).
         "SP5100_TCO",       # AMD SP5100/AM79C974 TCO watchdog (AMD servers).
         "IT87_WDT",         # IT87xx Super-I/O watchdog (older motherboards).
-        "NUVOTON_NCT6775_WDT",  # Nuvoton NCT6775 Super-I/O watchdog.
+        "W83627HF_WDT",     # W83627HF + NCT6775/6776/6779/6791/6792 Super-I/O watchdog.
         "SOFT_WATCHDOG",    # Software watchdog: always-available fallback.
         "IPMI_WATCHDOG",    # BMC watchdog (Intel/AMI IPMI 2.0 compliant BMCs).
     ],
 )
 def test_watchdog_options_are_added(option: str) -> None:
-    added = _added_lines()
-    assert f"module {option}" in added or f"enable {option}" in added, option
+    assert _line_begins_with(f"module {option}") or _line_begins_with(
+        f"enable {option}"
+    ), option
 
 
 def test_core_options_are_built_in_not_modules() -> None:
@@ -74,14 +151,27 @@ def test_core_options_are_built_in_not_modules() -> None:
     Otherwise /dev/watchdog is only present when something has loaded the
     module, which systemd does not do on its own.
     """
-    added = _added_lines()
-    assert "enable WATCHDOG" in added
-    assert "enable WATCHDOG_CORE" in added
+    assert _line_begins_with("enable WATCHDOG")
+    assert _line_begins_with("enable WATCHDOG_CORE")
     # And conversely, the specific drivers are modules, not built-in: a node
     # that lacks the hardware must not bind a stale watchdog at boot.
-    assert "module I6300ESB_WDT" in added
-    assert "module ITCO_WDT" in added
-    assert "module SP5100_TCO" in added
+    assert _line_begins_with("module I6300ESB_WDT")
+    assert _line_begins_with("module ITCO_WDT")
+    assert _line_begins_with("module SP5100_TCO")
+
+
+def test_x86_only_drivers_are_arch_guarded() -> None:
+    """I6300ESB_WDT / ITCO_WDT / SP5100_TCO / IT87_WDT / W83627HF_WDT are
+    x86-only Kconfig symbols.  FSDK's `module()` appends them to
+    expected-configs for every arch, so without an `arch == x86_64` guard
+    an aarch64 kernel build would fail "Missing XYZ" at olddefconfig time.
+    """
+    text = KERNEL_PATCH.read_text()
+    assert 'case "$arch" in' in text
+    assert "x86_64)" in text
+    # Arch-agnostic drivers stay outside the case.
+    assert _line_begins_with("module SOFT_WATCHDOG")
+    assert _line_begins_with("module IPMI_WATCHDOG")
 
 
 def test_patch_number_is_one_above_0006() -> None:

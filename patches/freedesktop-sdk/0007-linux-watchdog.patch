@@ -1,22 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: dtg01100 <dtg01100@users.noreply.github.com>
+Date: Sat, 4 Oct 2026 00:00:00 +0000
+Subject: [PATCH] linux: enable hardware watchdog core and x86 server drivers
+
+0007 builds on the 0006 kubenet patch (which already owns the last
+lines of fdsdk-config.sh): reproduce the last two lines of 0006 as
+context so the hunks apply in order, then add the watchdog core +
+x86-specific drivers below.
+
+WATCHDOG / WATCHDOG_CORE are enabled (built-in) so /dev/watchdog is
+present on every boot regardless of whether a driver has bound.  The
+specific drivers are `module`s so a node that lacks the hardware does
+not bind a stale watchdog; they are wrapped in an `arch == x86_64`
+guard because ITCO_WDT / I6300ESB_WDT / SP5100_TCO / W83627HF_WDT /
+IT87_WDT are x86-only Kconfig symbols and FSDK's `module()` script
+appends the name to expected-configs (an aarch64 kernel build would
+otherwise fail "Missing WXYZ" at olddefconfig time).
+
+The W83627HF_WDT driver covers NCT6775/6776/6779/6791/6792 Super-I/O
+watchdogs; there is no NUVOTON_NCT6775_WDT symbol in
+drivers/watchdog/Kconfig.
+
+---
+ files/linux/fdsdk-config.sh | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
 diff --git a/files/linux/fdsdk-config.sh b/files/linux/fdsdk-config.sh
 --- a/files/linux/fdsdk-config.sh
 +++ b/files/linux/fdsdk-config.sh
-@@ -2810,3 +2810,17 @@
- if has HAVE_ARCH_TRANSPARENT_HUGEPAGE; then
-     enable TRANSPARENT_HUGEPAGE
- fi
-+
-+# Bluefin Server: enable hardware watchdog support so systemd's
-+# RuntimeWatchdogSec= / RebootWatchdogSec= / ShutdownWatchdogSec= can bind
-+# to /dev/watchdog (watchdog core), and the common x86 server / BMC / SIO
-+# watchdog drivers are modules so an operator can `modprobe` the one that
-+# matches the platform without rebuilding the kernel.
+@@ -2810,2 +2810,15 @@
+ enable INET_DIAG_DESTROY
+ module NETFILTER_XT_TARGET_NOTRACK
 +enable WATCHDOG
 +enable WATCHDOG_CORE
-+module I6300ESB_WDT
-+module ITCO_WDT
-+module SP5100_TCO
-+module IT87_WDT
-+module NUVOTON_NCT6775_WDT
 +module SOFT_WATCHDOG
 +module IPMI_WATCHDOG
++case "$arch" in
++    x86_64)
++        module I6300ESB_WDT     # Intel 6300ESB PCI watchdog (older servers).
++        module ITCO_WDT         # Intel ICH/PCH TCO watchdog (most x86 boards).
++        module SP5100_TCO       # AMD SP5100/AM79C974 TCO watchdog (AMD servers).
++        module IT87_WDT         # IT87xx Super-I/O watchdog (older motherboards).
++        module W83627HF_WDT     # W83627HF + NCT6775/6776/6779/6791/6792 Super-I/O watchdog.
++        ;;
++esac
+-- 
+2.43.0
