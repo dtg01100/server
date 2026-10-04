@@ -1,12 +1,7 @@
-# HTTP → HTTPS redirect on the Gateway's plaintext listener, for every
-# host the homelab Gateway serves.  cert-manager's HTTP-01 solver still
-# uses the `http` listener (its exact-path solver route outranks this
-# redirect); regular requests get a 301 to the matching https URL.
-#
-# This redirect sits on the `http` listener; the addon routes in
-# files/homelab/addons/{10-argo-workflows,20-mcp,30-kubestellar-console}
-# are pinned to the `https` listener section, so the plaintext `:80`
-# listener only carries ACME challenges and 301 redirects.
+# Port 80 of the add-on host names answers with a redirect to https: their
+# routes take the https listener only, so a token or the Console's login
+# never crosses the LAN in cleartext. An ACME HTTP-01 solver's route (exact
+# path) still wins over it.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -21,7 +16,6 @@ spec:
   - "argo.${HOMELAB_DOMAIN}"
   - "mcp.${HOMELAB_DOMAIN}"
   - "kubestellar.${HOMELAB_DOMAIN}"
-  - "${HOMELAB_DOMAIN}"
   rules:
   - filters:
     - type: RequestRedirect

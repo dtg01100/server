@@ -1,9 +1,7 @@
-# The default Gateway: HTTP on port 80 (kept for cert-manager HTTP-01
-# challenges through the acme ClusterIssuer) and HTTPS on port 443
-# terminated by Envoy Gateway from the homelab-tls Secret in this
-# namespace (a wildcard cert for *.HOMELAB_DOMAIN, issued by cert-manager
-# — self-signed until HOMELAB_ACME_EMAIL is set, then ACME). Exposed
-# through a MetalLB LoadBalancer Service.
+# The default Gateway, exposed through a MetalLB LoadBalancer Service: HTTP
+# on port 80 and HTTPS on port 443 with the homelab-tls Secret in this
+# namespace (45-cert-manager/23-gateway-cert.yaml). Without cert-manager the
+# https listener has no certificate and the add-ons are unreachable.
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:

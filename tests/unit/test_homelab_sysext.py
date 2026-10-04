@@ -276,24 +276,27 @@ def test_default_gateway_and_issuers() -> None:
     assert acme["email"] == "${HOMELAB_ACME_EMAIL}", "only applied when an email is configured"
 
 
-def test_gateway_certificate_lists_addon_hostnames_explicitly() -> None:
-    """cert-manager refuses wildcard names on HTTP-01 ("Wildcard DNS names
-    can only be solved via DNS01"), so the names in 22-gateway-cert.yaml
-    must mirror the HTTPRoute hostnames in
-    files/homelab/addons/{10-argo-workflows,20-mcp,30-kubestellar-console}.
-    """
-    cert = docs(MANIFESTS / "45-cert-manager" / "22-gateway-cert.yaml")[0]
+def test_gateway_certificate_is_from_the_homelab_ca() -> None:
+    """The Gateway's certificate comes from a self-signed CA devices trust
+    once, never from ACME: HTTP-01 cannot reach a LAN domain, and an
+    unissued certificate would leave the https-only add-ons unreachable."""
+    ca, issuer = docs(MANIFESTS / "45-cert-manager" / "22-homelab-ca.yaml")
+    assert ca["kind"] == "Certificate" and ca["metadata"]["namespace"] == "cert-manager"
+    assert ca["spec"]["isCA"] is True
+    assert ca["spec"]["issuerRef"] == {"name": "selfsigned", "kind": "ClusterIssuer"}
+    assert "HOMELAB_" not in str(ca), "a changed input would reissue the CA devices trust"
+    assert issuer["kind"] == "ClusterIssuer" and issuer["metadata"]["name"] == "homelab-ca"
+    assert issuer["spec"] == {"ca": {"secretName": ca["spec"]["secretName"]}}
+    cert = docs(MANIFESTS / "45-cert-manager" / "23-gateway-cert.yaml")[0]
     assert cert["kind"] == "Certificate"
-    assert cert["metadata"]["name"] == "homelab-tls"
-    assert cert["metadata"]["namespace"] == "envoy-gateway-system"
+    assert cert["metadata"] == {"name": "homelab-tls", "namespace": "envoy-gateway-system"}
     assert cert["spec"]["secretName"] == "homelab-tls"
-    assert cert["spec"]["dnsNames"] == [
-        "argo.${HOMELAB_DOMAIN}",
-        "mcp.${HOMELAB_DOMAIN}",
-        "kubestellar.${HOMELAB_DOMAIN}",
-        "${HOMELAB_DOMAIN}",
-    ]
-    assert cert["spec"]["issuerRef"] == {"name": "${HOMELAB_ACME_ISSUER}", "kind": "ClusterIssuer"}
+    assert cert["spec"]["issuerRef"] == {"name": "homelab-ca", "kind": "ClusterIssuer"}
+    hosts = [h for d in ADDONS.glob("*/*.yaml") if "\nkind: HTTPRoute\n" in d.read_text()
+             for r in docs(d) if r["kind"] == "HTTPRoute" for h in r["spec"]["hostnames"]]
+    assert sorted(cert["spec"]["dnsNames"]) == sorted(set(hosts))
+    redirect = docs(MANIFESTS / "40-envoy-gateway" / "21-http-redirect.yaml")[0]
+    assert sorted(redirect["spec"]["hostnames"]) == sorted(set(hosts))
 
 
 def test_addon_http_routes_are_pinned_to_the_https_listener() -> None:
@@ -406,7 +409,8 @@ def test_generated_files_carry_the_header_and_hand_written_ones_are_known() -> N
         "40-envoy-gateway/21-http-redirect.yaml",
         "45-cert-manager/20-selfsigned-issuer.yaml",
         "45-cert-manager/21-acme-issuer.yaml",
-        "45-cert-manager/22-gateway-cert.yaml",
+        "45-cert-manager/22-homelab-ca.yaml",
+        "45-cert-manager/23-gateway-cert.yaml",
         "50-argocd/20-root-app.yaml",
     }
 
