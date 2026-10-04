@@ -153,6 +153,13 @@ def test_placeholders_are_applier_inputs_and_stay_strings() -> None:
     assert re.search(r"\[DOMAIN\]=home\.arpa", APPLIER.read_text()), "RFC 8375's home network domain"
 
 
+HSTS = [
+    {"type": "ResponseHeaderModifier",
+     "responseHeaderModifier": {"add": [
+         {"name": "Strict-Transport-Security",
+          "value": "max-age=63072000; includeSubDomains"}]}}]
+
+
 @pytest.mark.parametrize("directory,namespace,host,service,port", [
     ("10-argo-workflows", "argo", "argo", "argo-server", 2746),
     ("20-mcp", "mcp", "mcp", "mcp-kubernetes-mcp-server", 8080),
@@ -165,7 +172,14 @@ def test_each_ui_is_routed_through_the_homelab_gateway(directory, namespace, hos
     assert route["metadata"]["namespace"] == namespace
     assert route["spec"]["parentRefs"] == [{"name": "homelab", "namespace": "envoy-gateway-system"}]
     assert route["spec"]["hostnames"] == [f"{host}.${{HOMELAB_DOMAIN}}"]
-    assert route["spec"]["rules"] == [{"backendRefs": [{"name": service, "port": port}]}]
+    assert route["spec"]["rules"] == [{"backendRefs": [{"name": service, "port": port}],
+                                       "filters": HSTS}]
+    # The login gate (kubestellar-console-login) carries the same HSTS
+    # filter so the basic-auth prompt itself is upgraded on the next visit.
+    if directory == "30-kubestellar-console":
+        [gate] = [d for d in docs(ADDONS / directory / "11-login-gate.yaml")
+                  if d["kind"] == "HTTPRoute"]
+        assert gate["spec"]["rules"][0]["filters"] == HSTS
     svc = find(directory, "Service", service)
     assert svc["metadata"]["namespace"] == namespace
     assert port in [p["port"] for p in svc["spec"]["ports"]]

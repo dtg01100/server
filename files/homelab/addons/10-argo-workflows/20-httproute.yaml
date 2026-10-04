@@ -1,6 +1,9 @@
 # The Argo Workflows UI and API on the homelab Gateway at
 # argo.<HOMELAB_DOMAIN>. The server runs with --auth-mode=client: every
 # request needs a Kubernetes bearer token (kubectl create token).
+# The ResponseHeaderModifier filter adds Strict-Transport-Security so a
+# browser that has already reached argo.<domain> over HTTPS remembers to
+# upgrade future requests before any credential is sent (issue #389).
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -16,3 +19,9 @@ spec:
   - backendRefs:
     - name: argo-server
       port: 2746
+    filters:
+    - type: ResponseHeaderModifier
+      responseHeaderModifier:
+        add:
+        - name: Strict-Transport-Security
+          value: "max-age=63072000; includeSubDomains"
