@@ -197,6 +197,18 @@ EOF
     [[ "$output" == *"argocd: skipping 20-root-app.yaml: HOMELAB_ARGOCD_ROOT_REPO not set"* ]]
 }
 
+@test "without envoy-gateway, cert-manager skips the Gateway's certificate" {
+    kubeadm_node
+    run_applier
+    ls "${APPLIED}"/*-23-gateway-cert.yaml
+    rm -f "${APPLIED}"/*
+    run_applier HOMELAB_ENVOY_GATEWAY=no
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"cert-manager: skipping 23-gateway-cert.yaml: HOMELAB_ENVOY_GATEWAY=no"* ]]
+    [[ "$output" == *"cert-manager: ready"* ]]
+    ! ls "${APPLIED}"/*-23-gateway-cert.yaml
+}
+
 @test "configured inputs are validated and substituted" {
     kubeadm_node
     run_applier HOMELAB_METALLB_ADDRESSES="192.0.2.240-192.0.2.250, 198.51.100.0/28" \
@@ -320,6 +332,19 @@ with_addons() {
     grep -q 'create secret generic postgres-postgresql --from-literal=postgres-password=' "${LOG}"
 }
 
+@test "add-ons behind the https listener warn without cert-manager" {
+    kubeadm_node
+    with_addons
+    run_applier
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"HOMELAB_CERT_MANAGER=no"* ]]
+    run_applier HOMELAB_CERT_MANAGER=no
+    [ "$status" -eq 0 ]
+    for id in argo-workflows mcp kubestellar-console; do
+        [[ "$output" == *"<4>${id}: HOMELAB_CERT_MANAGER=no: the Gateway's https listener has no certificate, so ${id} is unreachable"* ]]
+    done
+}
+
 @test "add-ons: nothing is applied on a node" {
     kubeadm_node
     with_addons
@@ -356,7 +381,7 @@ console_issue() {
     console=$(ls "${APPLIED}"/*-10-kubestellar-console.yaml)
     grep -q 'homelab.bluefin.dev/console-sign-in: "password"' "${console}"
     grep -A1 'name: AUTH_ALLOWED_GITHUB_LOGINS' "${console}" | grep -q 'value: ""'
-    grep -q 'value: "http://kubestellar.home.arpa"' "${console}"
+    grep -q 'value: "https://kubestellar.home.arpa"' "${console}"
     ! grep -q 'HOMELAB_' "${console}"
     grep -q '"kubestellar.home.arpa"' "${APPLIED}"/*-11-login-gate.yaml
     ! grep -q 'create secret generic kubestellar-console-github-oauth' "${LOG}"
@@ -373,7 +398,7 @@ console_issue() {
     done
     # The login on the local consoles (like the join passphrase), not the journal.
     [ "$(stat -c %a "$(console_issue)")" = 600 ]
-    grep -qx 'KubeStellar Console: http://kubestellar.home.arpa (user admin, password 0123456789abcdef0123456789abcdef)' "$(console_issue)"
+    grep -qx 'KubeStellar Console: https://kubestellar.home.arpa (user admin, password 0123456789abcdef0123456789abcdef)' "$(console_issue)"
     grep -q "get secret kubestellar-console-login -o jsonpath='{.data.password}' | base64 -d" "$(console_issue)"
     [[ "$output" != *0123456789abcdef0123456789abcdef* ]]
     [[ "$output" != *"without HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS"* ]]

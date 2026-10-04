@@ -88,17 +88,39 @@ pinned by digest). Each directory has an `addon` file, `<default>
 every merged add-on in name order with the same rules (CRDs Established
 first, rollout waits, `secrets` generators, files with unset inputs skipped,
 never deleting); `HOMELAB_<ID>=yes|no` in `homelab.conf` overrides the
-default. The UIs are HTTPRoutes on the default Gateway (`homelab`, plain
-HTTP on port 80 of its MetalLB address) by host name under
+default. The UIs are HTTPRoutes on the default Gateway (`homelab`, HTTPS on
+port 443 of its MetalLB address, see "TLS" below) by host name under
 `HOMELAB_DOMAIN` (default `home.arpa`): point `argo.`, `mcp.` and
 `kubestellar.<domain>` at that address.
 
 | Directory (sysext) | Default | What |
 |---|---|---|
 | `10-argo-workflows` (`argo-workflows`) | on | Argo Workflows v4.1.4, namespace-scoped install in `argo`; the server runs `--auth-mode=client --secure=false`: every API call carries a Kubernetes token, e.g. `kubectl -n argo create token argo-server` (bind a Role for your own account). |
-| `20-mcp` (`mcp`) | on | [kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server) v0.0.67, Streamable HTTP at `http://mcp.<domain>/mcp`. Read-only (`read_only = true`, Secrets denied); `require_oauth` with token passthrough: a request without a bearer token gets 401, and the API server authenticates and authorizes every tool call. The client token is Kubernetes-generated, never logged: `kubectl -n mcp get secret mcp-client-token -o jsonpath='{.data.token}' \| base64 -d` (`mcp-client`, ClusterRole `view`). `HOMELAB_MCP_READ_WRITE=yes` turns the write tools on and binds `edit`; switching back hides the tools, and the binding stays until you delete `clusterrolebinding/mcp-client-edit`. |
+| `20-mcp` (`mcp`) | on | [kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server) v0.0.67, Streamable HTTP at `https://mcp.<domain>/mcp`. Read-only (`read_only = true`, Secrets denied); `require_oauth` with token passthrough: a request without a bearer token gets 401, and the API server authenticates and authorizes every tool call. The client token is Kubernetes-generated, never logged: `kubectl -n mcp get secret mcp-client-token -o jsonpath='{.data.token}' \| base64 -d` (`mcp-client`, ClusterRole `view`). `HOMELAB_MCP_READ_WRITE=yes` turns the write tools on and binds `edit`; switching back hides the tools, and the binding stays until you delete `clusterrolebinding/mcp-client-edit`. |
 | `30-kubestellar-console` (`kubestellar`) | on | KubeStellar Console v0.3.42, deployed as is: see "KubeStellar Console sign-in" below. |
 | `31-kubestellar-full` (`kubestellar`) | off | `HOMELAB_KUBESTELLAR_FULL=yes`: KubeStellar core chart 0.30.0 (KubeFlex and the PostCreateHooks that install the KubeStellar controllers into the ITS/WDS control planes you create), with a pinned Postgres in place of KubeFlex's runtime Helm install. Not covered by the QEMU check. |
+
+**TLS.** The add-on HTTPRoutes take only the Gateway's `https` listener
+(`sectionName: https`), so a bearer token, the Console's login password and
+its session cookie never cross the LAN in cleartext; on port 80 the add-on
+names answer with a 301 to `https://` (`40-envoy-gateway/21-http-redirect.yaml`).
+The certificate (`homelab-tls` in `envoy-gateway-system`, for `argo.`, `mcp.`
+and `kubestellar.<domain>`) comes from the `homelab-ca` ClusterIssuer: a
+self-signed CA that cert-manager creates once (ten years) and keeps in
+`cert-manager/homelab-ca`; the leaf renews by itself and Envoy picks it up.
+Browsers warn until you trust that CA, once per device:
+
+```bash
+kubectl -n cert-manager get secret homelab-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > homelab-ca.crt
+```
+
+MCP clients and the `argo` CLI need it too (Go tools read `SSL_CERT_FILE`,
+Node.js ones `NODE_EXTRA_CA_CERTS`). The Gateway does not use the `acme` ClusterIssuer:
+HTTP-01 needs every name reachable from the internet, which a LAN domain
+such as `home.arpa` never is, and a certificate that cannot be issued would
+leave the add-ons unreachable. `HOMELAB_CERT_MANAGER=no` does the same:
+the `https` listener has no certificate, and the applier warns for every
+add-on it applies behind it.
 
 **KubeStellar Console sign-in.** Without a GitHub OAuth app, the Console's
 `GET /auth/github` signs in as its built-in admin (`dev-user`; upstream
@@ -126,7 +148,7 @@ gets around the gate through its Service; Cilium (kubeadm) and kube-router
 (k0s, which runs it with `--run-firewall`) enforce it, another CNI might not.
 
 GitHub sign-in instead: a GitHub OAuth app (callback
-`http://kubestellar.<domain>/auth/github/callback`) with its client id and
+`https://kubestellar.<domain>/auth/github/callback`) with its client id and
 secret in `/etc/bluefin/homelab.d/kubestellar-console/github-client-id` and
 `github-client-secret` (no trailing newline, mode 0600). The next applier
 run makes the Secret `kubestellar-console-github-oauth` and rolls the Console
@@ -141,8 +163,9 @@ kubestellar-console-github-oauth` (the applier never deletes).
 Mind that:
 - everyone with the password is the same admin (`dev-user`): no personal
   identity or audit trail; GitHub sign-in gives one;
-- the Gateway speaks plain HTTP: the password and the session cookie cross
-  the LAN in cleartext;
+- the password and the session cookie are only as safe as the trust in the
+  homelab CA: a browser that clicked through the certificate warning instead
+  of trusting the CA cannot tell the Gateway from an impostor on the LAN;
 - signing out ends the Console session, but the browser keeps the basic-auth
   login until it is closed, so signing in again does not ask for it;
 - the gate covers the session-creating endpoints of Console v0.3.42 (its
@@ -206,14 +229,17 @@ installer, which installs kubeadm only.
 - `just dogfood-homelab-templates`: a diskless control plane from
   `homelab-control-plane.bu` and a node from `homelab-node.ign` with the
   passphrase it showed; the default set applied (monitoring off, MetalLB
-  without a pool), a local-path PVC bound, both nodes Ready; the add-ons:
-  Argo Workflows answers 401 without a token and accepts a `kubectl create
-  token` one, the MCP server answers 401 without a token, reads with the
-  `mcp-client` token and refuses a write tool; the Console is deployed
-  without OAuth, `/auth/github` through the Gateway answers 401 without
-  the login (and in another spelling) and, with the generated one, redirects
-  with a `kc_auth` cookie that `/api/me` accepts as the admin; a pod in
-  another namespace cannot reach the Console's Service (NetworkPolicy), and
-  the login is on the console, not in the journal. Needs guest internet.
+  without a pool), a local-path PVC bound, both nodes Ready; the Gateway
+  serves the add-ons over HTTPS with a certificate that verifies against
+  the homelab CA, and port 80 redirects without asking for the login; the
+  add-ons: Argo Workflows answers 401 without a token
+  and accepts a `kubectl create token` one, the MCP server answers 401
+  without a token, reads with the `mcp-client` token and refuses a write
+  tool; the Console is deployed without OAuth, `/auth/github` through the
+  Gateway answers 401 without the login (and in another spelling) and,
+  with the generated one, redirects with a `kc_auth` cookie that
+  `/api/me` accepts as the admin; a pod in another namespace cannot reach
+  the Console's Service (NetworkPolicy), and the login is on the console,
+  not in the journal. Needs guest internet.
 - `just dogfood-homelab-installer`: the same from the USB installer's Homelab
   entries, offline installs ([usb-installer.md](usb-installer.md)).

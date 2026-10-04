@@ -1,5 +1,7 @@
-# The MCP endpoint (Streamable HTTP, http://mcp.<HOMELAB_DOMAIN>/mcp) on the
-# homelab Gateway. Requests without a bearer token get 401.
+# The MCP endpoint (Streamable HTTP, https://mcp.<HOMELAB_DOMAIN>/mcp) on the
+# homelab Gateway. Requests without a bearer token get 401.  Pinned to
+# the `https` listener section so the bearer token never traverses the
+# plaintext `:80` listener.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -9,6 +11,7 @@ spec:
   parentRefs:
   - name: homelab
     namespace: envoy-gateway-system
+    sectionName: https
   hostnames:
   - "mcp.${HOMELAB_DOMAIN}"
   rules:

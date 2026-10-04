@@ -163,7 +163,9 @@ def test_each_ui_is_routed_through_the_homelab_gateway(directory, namespace, hos
     [route] = [d for p in (ADDONS / directory).glob("*.yaml") for d in docs(p)
                if d["kind"] == "HTTPRoute" and d["metadata"]["name"] != "kubestellar-console-login"]
     assert route["metadata"]["namespace"] == namespace
-    assert route["spec"]["parentRefs"] == [{"name": "homelab", "namespace": "envoy-gateway-system"}]
+    assert route["spec"]["parentRefs"] == [
+        {"name": "homelab", "namespace": "envoy-gateway-system", "sectionName": "https"}
+    ]
     assert route["spec"]["hostnames"] == [f"{host}.${{HOMELAB_DOMAIN}}"]
     assert route["spec"]["rules"] == [{"backendRefs": [{"name": service, "port": port}]}]
     svc = find(directory, "Service", service)
@@ -280,7 +282,7 @@ def test_console_is_deployed_by_default_without_github_oauth() -> None:
     assert env["IGNORE_PERSISTED_OAUTH_CREDENTIALS"]["value"] == "true"
     assert env["AUTH_ALLOWED_GITHUB_LOGINS"]["value"] == "${HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS}"
     assert env["AUTH_ADMIN_GITHUB_LOGINS"]["value"] == "${HOMELAB_KUBESTELLAR_CONSOLE_ADMIN_LOGINS}"
-    assert env["FRONTEND_URL"]["value"] == "http://kubestellar.${HOMELAB_DOMAIN}"
+    assert env["FRONTEND_URL"]["value"] == "https://kubestellar.${HOMELAB_DOMAIN}"
     assert not {"DEV_MODE", "ALLOW_DEV_MODE_IN_CLUSTER", "SKIP_ONBOARDING"} & set(env)
     deployment = find(CONSOLE, "Deployment", "kubestellar-console")
     assert deployment["spec"]["template"]["metadata"]["annotations"] == {
