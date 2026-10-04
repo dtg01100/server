@@ -435,7 +435,10 @@ def patch_argo_workflows(docs: list[dict]) -> list[dict]:
         if d["kind"] == "Deployment" and d["metadata"]["name"] == "argo-server":
             c = d["spec"]["template"]["spec"]["containers"][0]
             # Clients authenticate with their own Kubernetes token
-            # (kubectl create token), and the Gateway speaks plain HTTP.
+            # (kubectl create token), and the route is pinned to the
+            # Gateway's https listener (`files/homelab/addons/10-argo-
+            # workflows/20-httproute.yaml`), so argo-server itself
+            # terminates plain HTTP inside the cluster.
             c["args"] += ["--auth-mode=client", "--secure=false"]
             c["readinessProbe"]["httpGet"]["scheme"] = "HTTP"
         if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "workflow-controller-configmap":

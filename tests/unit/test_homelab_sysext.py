@@ -18,6 +18,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 HOMELAB = ROOT / "files" / "homelab"
 MANIFESTS = HOMELAB / "manifests"
+ADDONS = HOMELAB / "addons"
 APPLIER = HOMELAB / "sysext" / "bluefin-homelab-apply"
 UNIT = HOMELAB / "sysext" / "bluefin-homelab-apply.service"
 ELEMENT = ROOT / "elements" / "oci" / "homelab-sysext.bst"
@@ -275,14 +276,69 @@ def test_default_gateway_and_issuers() -> None:
     assert acme["email"] == "${HOMELAB_ACME_EMAIL}", "only applied when an email is configured"
 
 
-def test_gateway_certificate_covers_wildcard_domain() -> None:
+def test_gateway_certificate_lists_addon_hostnames_explicitly() -> None:
+    """cert-manager refuses wildcard names on HTTP-01 ("Wildcard DNS names
+    can only be solved via DNS01"), so the names in 22-gateway-cert.yaml
+    must mirror the HTTPRoute hostnames in
+    files/homelab/addons/{10-argo-workflows,20-mcp,30-kubestellar-console}.
+    """
     cert = docs(MANIFESTS / "45-cert-manager" / "22-gateway-cert.yaml")[0]
     assert cert["kind"] == "Certificate"
     assert cert["metadata"]["name"] == "homelab-tls"
     assert cert["metadata"]["namespace"] == "envoy-gateway-system"
     assert cert["spec"]["secretName"] == "homelab-tls"
-    assert cert["spec"]["dnsNames"] == ["*.${HOMELAB_DOMAIN}", "${HOMELAB_DOMAIN}"]
+    assert cert["spec"]["dnsNames"] == [
+        "argo.${HOMELAB_DOMAIN}",
+        "mcp.${HOMELAB_DOMAIN}",
+        "kubestellar.${HOMELAB_DOMAIN}",
+        "${HOMELAB_DOMAIN}",
+    ]
     assert cert["spec"]["issuerRef"] == {"name": "${HOMELAB_ACME_ISSUER}", "kind": "ClusterIssuer"}
+
+
+def test_addon_http_routes_are_pinned_to_the_https_listener() -> None:
+    """The Console routes and the add-on routes take a bearer token or a
+    basic-auth password; if they were reachable on the plaintext `:80`
+    listener too, the secret would cross the LAN in cleartext.  The
+    redirect on the `http` listener is a separate HTTPRoute.
+    """
+    for relative in (
+        ("10-argo-workflows", "20-httproute.yaml"),
+        ("20-mcp", "22-httproute.yaml"),
+        ("30-kubestellar-console", "20-httproute.yaml"),
+        ("30-kubestellar-console", "11-login-gate.yaml"),
+    ):
+        routes = [
+            d for d in docs(ADDONS / relative[0] / relative[1])
+            if d["kind"] == "HTTPRoute"
+        ]
+        assert routes, f"no HTTPRoute in {relative[0]}/{relative[1]}"
+        for r in routes:
+            assert r["spec"]["parentRefs"][0]["sectionName"] == "https", (
+                f"{relative[0]}/{relative[1]} {r['metadata']['name']} is not "
+                f"pinned to the https listener"
+            )
+
+
+def test_http_listener_redirects_to_https() -> None:
+    """The http listener carries cert-manager's HTTP-01 solver route and
+    a separate 301 redirect; the addon routes above must not bind to it.
+    """
+    redirect = next(
+        d for d in docs(MANIFESTS / "40-envoy-gateway" / "21-http-redirect.yaml")
+        if d["kind"] == "HTTPRoute"
+    )
+    assert redirect["metadata"]["name"] == "http-to-https"
+    assert redirect["spec"]["parentRefs"] == [
+        {"name": "homelab", "namespace": "envoy-gateway-system", "sectionName": "http"}
+    ]
+    filters = redirect["spec"]["rules"][0]["filters"]
+    assert any(
+        f.get("type") == "RequestRedirect"
+        and f["requestRedirect"]["scheme"] == "https"
+        and f["requestRedirect"]["statusCode"] == 301
+        for f in filters
+    )
 
 
 def test_monitoring_stack_defaults() -> None:
@@ -347,6 +403,7 @@ def test_generated_files_carry_the_header_and_hand_written_ones_are_known() -> N
     assert hand == {
         "30-metallb/20-pool.yaml",
         "40-envoy-gateway/20-gateway.yaml",
+        "40-envoy-gateway/21-http-redirect.yaml",
         "45-cert-manager/20-selfsigned-issuer.yaml",
         "45-cert-manager/21-acme-issuer.yaml",
         "45-cert-manager/22-gateway-cert.yaml",

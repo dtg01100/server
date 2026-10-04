@@ -124,19 +124,24 @@ ks_get() { kubectl -n kubestellar-console get "$@"; }
 echo "PROBE cp-console ready=$(ks_get deploy kubestellar-console -o jsonpath='{.status.readyReplicas}') sign-in=$(ks_get deploy kubestellar-console -o jsonpath='{.spec.template.metadata.annotations.homelab\.bluefin\.dev/console-sign-in}') oauth-secret=$(ks_get secret kubestellar-console-github-oauth >/dev/null 2>&1 && echo yes || echo no) dev-mode=$(ks_get deploy kubestellar-console -o yaml | grep -c DEV_MODE)"
 login="$(ks_get secret kubestellar-console-login -o jsonpath='{.data.password}' | base64 -d)"
 ks() { curl -s --max-time 20 -H 'Host: kubestellar.home.arpa' "$@"; }
-for _ in $(seq 60); do [ "$(ks -o /dev/null -w '%{http_code}' "http://${gw}/auth/github")" = 401 ] && break; sleep 5; done
-ks -D "${TMPDIR:-/tmp}/ks-noauth" -o /dev/null "http://${gw}/auth/github"
-ks -D "${TMPDIR:-/tmp}/ks-login" -o /dev/null -u "admin:${login}" "http://${gw}/auth/github"
+for _ in $(seq 60); do [ "$(ks -o /dev/null -w '%{http_code}' "https://${gw}/auth/github")" = 401 ] && break; sleep 5; done
+ks -D "${TMPDIR:-/tmp}/ks-noauth" -o /dev/null "https://${gw}/auth/github"
+ks -D "${TMPDIR:-/tmp}/ks-login" -o /dev/null -u "admin:${login}" "https://${gw}/auth/github"
 status() { sed -n '1s/^HTTP[^ ]* \([0-9]*\).*/\1/p' "$1"; }
 session="$(sed -n 's/^[Ss]et-[Cc]ookie: kc_auth=\([^;]*\);.*/\1/p' "${TMPDIR:-/tmp}/ks-login")"
-me="$(ks -b "kc_auth=${session}" "http://${gw}/api/me")"
+me="$(ks -b "kc_auth=${session}" "https://${gw}/api/me")"
 printf '%s\n' "${me}" | cut -c1-200 | sed 's/^/PROBE-LOG console me: /'
-echo "PROBE cp-console-gate noauth=$(status "${TMPDIR:-/tmp}/ks-noauth") challenge=$(grep -ci '^www-authenticate: basic' "${TMPDIR:-/tmp}/ks-noauth") variant=$(ks -o /dev/null -w '%{http_code}' "http://${gw}/AUTH/GitHub/") wrong=$(ks -o /dev/null -w '%{http_code}' -u admin:wrong "http://${gw}/auth/github") manifest=$(ks -o /dev/null -w '%{http_code}' "http://${gw}/auth/manifest/setup") login=$(status "${TMPDIR:-/tmp}/ks-login") location=$(sed -n 's/^[Ll]ocation: //p' "${TMPDIR:-/tmp}/ks-login" | tr -d '\r') cookie=$([ -n "${session}" ] && echo kc_auth || echo none) me=$(ks -o /dev/null -w '%{http_code}' -b "kc_auth=${session}" "http://${gw}/api/me") me-nocookie=$(ks -o /dev/null -w '%{http_code}' "http://${gw}/api/me") role=$(grep -o '"role":"[a-z]*"' <<<"${me}" | cut -d'"' -f4) user=$(grep -o '"github_login":"[a-z-]*"' <<<"${me}" | cut -d'"' -f4)"
+echo "PROBE cp-console-gate noauth=$(status "${TMPDIR:-/tmp}/ks-noauth") challenge=$(grep -ci '^www-authenticate: basic' "${TMPDIR:-/tmp}/ks-noauth") variant=$(ks -o /dev/null -w '%{http_code}' "https://${gw}/AUTH/GitHub/") wrong=$(ks -o /dev/null -w '%{http_code}' -u admin:wrong "https://${gw}/auth/github") manifest=$(ks -o /dev/null -w '%{http_code}' "https://${gw}/auth/manifest/setup") login=$(status "${TMPDIR:-/tmp}/ks-login") location=$(sed -n 's/^[Ll]ocation: //p' "${TMPDIR:-/tmp}/ks-login" | tr -d '\r') cookie=$([ -n "${session}" ] && echo kc_auth || echo none) me=$(ks -o /dev/null -w '%{http_code}' -b "kc_auth=${session}" "https://${gw}/api/me") me-nocookie=$(ks -o /dev/null -w '%{http_code}' "https://${gw}/api/me") role=$(grep -o '"role":"[a-z]*"' <<<"${…
 # NetworkPolicy: a pod in another namespace reaches the Console only through the Gateway.
 np() { kubectl -n default run "np-$1" --image=docker.io/library/busybox:1.37.0 --restart=Never --rm -i --quiet --pod-running-timeout=5m --command -- sh -c "$2" >/dev/null 2>&1 && echo ok || echo blocked; }
 echo "PROBE cp-console-netpol direct=$(np direct 'wget -T 10 -q -O /dev/null http://kubestellar-console.kubestellar-console.svc:8080/watchdog/health') gateway=$(np gateway "wget -T 10 -q -O /dev/null --header 'Host: kubestellar.home.arpa' http://${gw}/watchdog/health")"
 issue=/run/issue.d/51-kubestellar-console.issue
-echo "PROBE cp-console-issue mode=$(stat -c %a "${issue}") url=$(grep -c '^KubeStellar Console: http://kubestellar.home.arpa (user admin, password ' "${issue}") login=$(grep -cF "password ${login})" "${issue}") journal=$(journalctl -b -o cat | grep -cF "${login}")"
+echo "PROBE cp-console-issue mode=$(stat -c %a "${issue}") url=$(grep -c '^KubeStellar Console: https://kubestellar.home.arpa (user admin, password ' "${issue}") login=$(grep -cF "password ${login})" "${issue}") journal=$(journalctl -b -o cat | grep -cF "${login}")"
+# TLS probe: the Gateway terminates https from the homelab-tls Secret; we
+# only own its issuer (selfsigned or ACME), not the upstream trust chain,
+# so -k is correct here.  A 200 from /watchdog/health confirms the cert
+# handed to curl matches kubestellar.home.arpa and the Console is up.
+echo "PROBE cp-console-tls issuer=$(kubectl -n envoy-gateway-system get cert homelab-tls -o jsonpath='{.status.issuanceStatus.name.status}' 2>/dev/null || echo none) sni=$(echo Q | openssl s_client -connect "${gw}":443 -servername kubestellar.home.arpa -CAfile /etc/ssl/certs/ca-certificates.crt -verify_quiet 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null | grep -c kubestellar.home.arpa) health=$(curl -ksS --max-time 10 -H 'Host: kubestellar.home.arpa' -o /dev/null -w '%{http_code}' https://${gw}/watchdog/health)"
 # GitHub sign-in instead: dummy OAuth app files roll the Console over.
 install -d -m 0700 /etc/bluefin/homelab.d/kubestellar-console
 printf %s dummy-client-id > /etc/bluefin/homelab.d/kubestellar-console/github-client-id
@@ -145,8 +150,8 @@ chmod 0600 /etc/bluefin/homelab.d/kubestellar-console/*
 systemctl restart bluefin-homelab-apply.service
 journalctl -b -o cat --no-pager -u bluefin-homelab-apply.service | grep -E 'kubestellar|failed' | tail -n 8 | sed 's/^/PROBE-LOG apply2: /'
 kubectl -n kubestellar-console rollout status deploy/kubestellar-console --timeout=300s >/dev/null 2>&1
-ks -D "${TMPDIR:-/tmp}/ks-oauth" -o /dev/null -u "admin:${login}" "http://${gw}/auth/github"
-echo "PROBE cp-console-oauth apply=$(systemctl show -P Result bluefin-homelab-apply.service) sign-in=$(ks_get deploy kubestellar-console -o jsonpath='{.spec.template.metadata.annotations.homelab\.bluefin\.dev/console-sign-in}') ready=$(ks_get deploy kubestellar-console -o jsonpath='{.status.readyReplicas}') noauth=$(ks -o /dev/null -w '%{http_code}' "http://${gw}/auth/github") login=$(status "${TMPDIR:-/tmp}/ks-oauth") github=$(grep -ci '^location: https://github.com/login/oauth/authorize?.*client_id=dummy-client-id' "${TMPDIR:-/tmp}/ks-oauth") warned=$(journalctl -b -o cat -u bluefin-homelab-apply.service | grep -c 'GitHub sign-in without HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS') secret-logged=$(journalctl -b -o cat | grep -c dummy-client-secret)"
+ks -D "${TMPDIR:-/tmp}/ks-oauth" -o /dev/null -u "admin:${login}" "https://${gw}/auth/github"
+echo "PROBE cp-console-oauth apply=$(systemctl show -P Result bluefin-homelab-apply.service) sign-in=$(ks_get deploy kubestellar-console -o jsonpath='{.spec.template.metadata.annotations.homelab\.bluefin\.dev/console-sign-in}') ready=$(ks_get deploy kubestellar-console -o jsonpath='{.status.readyReplicas}') noauth=$(ks -o /dev/null -w '%{http_code}' "https://${gw}/auth/github") login=$(status "${TMPDIR:-/tmp}/ks-oauth") github=$(grep -ci '^location: https://github.com/login/oauth/authorize?.*client_id=dummy-client-id' "${TMPDIR:-/tmp}/ks-oauth") warned=$(journalctl -b -o cat -u bluefin-homelab-apply.service | grep -c 'GitHub sign-in without HOMELAB_KUBESTELLAR_CONSOLE_ALLOWED_LOGINS') secret-logged=$(journalctl -b -o cat | grep -c dummy-client-secret)"
 echo "PROBE cp-unhealthy-pods=$(kubectl get pods -A --no-headers | grep -cvE ' (Running|Completed) ')"
 # Release the node (until now pods may run on it), and give it time to see it.
 kubectl label nodes --all --overwrite dogfood-done=true >/dev/null
@@ -229,7 +234,8 @@ check cp 'PROBE cp-nodes-ready=2 nodes=2'
 check cp 'PROBE cp-argo ready=1 1 auth=auth-mode=client notoken=401 token=200$'
 check cp 'PROBE cp-mcp ready=1 notoken=401 read=ok write=refused$'
 check cp 'PROBE cp-console ready=1 sign-in=password oauth-secret=no dev-mode=0$'
-check cp 'PROBE cp-console-gate noauth=401 challenge=1 variant=401 wrong=401 manifest=401 login=307 location=http://kubestellar\.home\.arpa/auth/callback\?onboarded=true cookie=kc_auth me=200 me-nocookie=401 role=admin user=dev-user$'
+check cp 'PROBE cp-console-gate noauth=401 challenge=1 variant=401 wrong=401 manifest=401 login=307 location=https://kubestellar\.home\.arpa/auth/callback\?onboarded=true cookie=kc_auth me=200 me-nocookie=401 role=admin user=dev-user$'
+check cp 'PROBE cp-console-tls issuer=Ready sni=1 health=200$'
 check cp 'PROBE cp-console-netpol direct=blocked gateway=ok$'
 check cp 'PROBE cp-console-issue mode=600 url=1 login=1 journal=0$'
 check cp 'PROBE cp-console-oauth apply=success sign-in=github ready=1 noauth=401 login=307 github=1 warned=1 secret-logged=0$'

@@ -10,6 +10,8 @@
 # RegularExpression above any PathPrefix, and Envoy normalizes the path
 # (dot segments, merged slashes) first; the Console does not unescape it.
 # Applied after the Secrets and before 20-httproute.yaml, the policy first.
+# Pinned to the `https` listener section so the password-protected
+# `/auth/github` request never traverses the plaintext `:80` listener.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: SecurityPolicy
 metadata:
@@ -33,6 +35,7 @@ spec:
   parentRefs:
   - name: homelab
     namespace: envoy-gateway-system
+    sectionName: https
   hostnames:
   - "kubestellar.${HOMELAB_DOMAIN}"
   rules:

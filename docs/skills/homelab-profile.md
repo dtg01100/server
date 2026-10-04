@@ -106,7 +106,10 @@ MetalLB address of its LoadBalancer Service, by host name under
 is always there; the `acme` ClusterIssuer is added when
 `HOMELAB_ACME_EMAIL` is set (HTTP-01 solved through the same Gateway). The
 applier renders a `Certificate` named `homelab-tls` in
-`envoy-gateway-system` for `*.HOMELAB_DOMAIN` and the bare domain. Its
+`envoy-gateway-system` for the three add-on hostnames
+(`argo.`, `mcp.`, `kubestellar.<HOMELAB_DOMAIN>`) and the bare domain; the
+names are listed explicitly because cert-manager refuses wildcard names
+on HTTP-01 ("Wildcard DNS names can only be solved via DNS01"). Its
 `issuerRef` is `acme` when an ACME email is configured, else `selfsigned`
 (then LAN devices have to trust the cert out of band): the Gateway's HTTPS
 listener serves both, but the second is untrusted. Cert-manager rotates
@@ -115,6 +118,14 @@ renewals with no rollout. The `http01` solver points at the `homelab`
 Gateway on its HTTP listener, which is the same place the add-ons' HTTPRoutes
 attach; ACME therefore must be able to reach the Gateway's MetalLB address
 under the names it issues for (split-horizon DNS or a real public record).
+
+The add-on HTTPRoutes are pinned to the Gateway's `https` listener
+(`sectionName: https`), so the password-protected `/auth/github` and the
+bearer-token requests never traverse the plaintext `:80` listener. A
+second HTTPRoute (`40-envoy-gateway/21-http-redirect.yaml`) sits on the
+`http` listener and 301-redirects to the matching https URL, so a
+browser pointed at `http://argo.<domain>/` lands on `https://` (the
+ACME solver's exact-path route still outranks it for challenges).
 
 **KubeStellar Console sign-in.** Without a GitHub OAuth app, the Console's
 `GET /auth/github` signs in as its built-in admin (`dev-user`; upstream
