@@ -1,57 +1,31 @@
 #!/usr/bin/bash
-# bluefin-update-status-migrate — one-shot apply of the latest
-# 80-bluefin-updates.preset for nodes that updated into an image whose
-# preset added or changed a rule (issue #366, #367).
+# bluefin-update-status-migrate — run once per installed node by
+# bluefin-update-status-migrate.service.
 #
-# system-preset only runs on first boot (Ignition calls `systemctl
-# preset-all` for /etc systemd and /usr factory presets on a fresh
-# install), so a node that sysupds into an image with a new
-# `enable bluefin-*.service` line never evaluates it.  Running the
-# preset here applies the latest rules on every image update.
-#
-# The unit is gated by ConditionPathExists=!stamp in
-# bluefin-update-status-migrate.service, so this helper is only entered
-# once per node, ever.  We still create the stamp at the end so an
-# operator who manually removes the unit's ConditionPathExists=! sees the
-# same short-circuit.
-#
-# The helper exits 0 unconditionally; a failed `systemctl preset`
-# (the unit file missing, systemd not reachable) is not an error the
-# boot needs to surface — the worst case is the documented
-# `systemctl preset-all` on the operator's next login, which is the
-# same path a fresh install takes anyway.
-#
-# After preset, `systemctl start --no-block` populates /run/motd and
-# /run/issue.d immediately rather than waiting for the next
-# systemd-sysupdate.service run (which the OnSuccess=/OnFailure= chain
-# in 30-update-status.conf drives).
-
+# Presets apply on first boot only, so a node that updated from an image
+# without bluefin-update-status.service never enables it and its login
+# banners stay empty (projectbluefin/server#367). Enable it from its preset
+# rule and start it so the banners show on this boot. Nothing else in
+# 80-bluefin-updates.preset is touched: re-applying the update timers would
+# undo an operator's opt-out.
 set -euo pipefail
 
-preset="${BLUEFIN_UPDATES_PRESET:-/usr/lib/systemd/system-preset/80-bluefin-updates.preset}"
-# Test overrides so the bats test can stub systemd and pin the stamp.
 systemctl="${BLUEFIN_SYSTEMCTL:-systemctl}"
 stamp="${BLUEFIN_UPDATE_STATUS_MIGRATE_STAMP:-/var/lib/bluefin/update-status-migrate.stamp}"
+unit=bluefin-update-status.service
 
-# Idempotent: `systemctl preset` is a no-op when every preset rule is
-# already satisfied (unit enabled) and when no preset has a rule for
-# the unit.  Apply every `enable X` line in 80-bluefin-updates.preset
-# so the migration covers future additions, not only the line #366
-# added.
-if [ -f "${preset}" ]; then
-    while read -r action unit; do
-        case "${action}" in
-            ''|\#*) continue ;;
-            enable) "${systemctl}" preset "${unit}" >/dev/null 2>&1 || :
-                    # Populate the banners on the boot that runs the
-                    # migration, not on the next systemd-sysupdate run.
-                    "${systemctl}" start --no-block "${unit}" >/dev/null 2>&1 || :
-                    ;;
-            *) continue ;;
-        esac
-    done <"${preset}"
+if "${systemctl}" is-enabled --quiet "${unit}"; then
+    echo "bluefin-update-status-migrate: ${unit} already enabled"
+else
+    # Honours an operator preset (e.g. Ignition's) that disables it.
+    "${systemctl}" preset "${unit}" || :
+    if "${systemctl}" is-enabled --quiet "${unit}"; then
+        "${systemctl}" start --no-block "${unit}" || :
+        echo "bluefin-update-status-migrate: enabled ${unit}"
+    else
+        echo "bluefin-update-status-migrate: ${unit} left disabled by preset"
+    fi
 fi
 
-mkdir -p "$(dirname "${stamp}")"
-: > "${stamp}"
-echo "bluefin-update-status-migrate: 80-bluefin-updates preset applied"
+mkdir -p "${stamp%/*}"
+: >"${stamp}"

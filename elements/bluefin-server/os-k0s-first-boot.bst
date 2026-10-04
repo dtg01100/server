@@ -10,11 +10,9 @@ description: |
   units (systemd-sysupdate(-reboot) drop-ins for diskless conditions, the
   kured flag, the reboot interlock: operator lock files, failed-update guard,
   Kubernetes; the boot deadline; the diskless update check;
-  bluefin-update-status.service for the login banners), and the
-  one-shot update-preset migration unit (bluefin-update-status-migrate.service,
-  re-applies 80-bluefin-updates.preset on nodes that sysupd-into an image
-  where the preset added a new rule; auto-enabled via multi-user.target.wants/
-  in elements/oci/bluefin-server-usr.bst — projectbluefin/server#367).
+  bluefin-update-status.service for the login banners and
+  bluefin-update-status-migrate.service, which enables it on nodes that
+  updated from an image without it).
 
 sources:
   - kind: local

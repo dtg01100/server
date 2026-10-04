@@ -1,22 +1,13 @@
 [Unit]
-Description=Enable the 80-bluefin-updates preset on nodes that updated into this image
+Description=Enable the Login Banner Update Status on Updated Nodes
 Documentation=file:/usr/libexec/bluefin-update-status-migrate
-# Apply the latest 80-bluefin-updates preset to every unit it enables for
-# nodes that sysupd-into an image where the preset added or changed a rule
-# (projectbluefin/server#366, projectbluefin/server#367).
-# system-preset only runs on first boot (Ignition calls `systemctl preset-all`
-# for /etc systemd and /usr factory presets on a fresh install), so a node
-# that sysupds into an image with a new `enable bluefin-*.service` line
-# never evaluates it.  Without this migration, units like
-# bluefin-update-status.service stay disabled on nodes that updated into
-# the image, and /run/motd / /run/issue.d stay empty until the next
-# systemd-sysupdate.service run triggers bluefin-update-status.service via
-# OnSuccess=/OnFailure=.
-# Runs once per node (stamp in ConditionPathExists=!), so it does not
-# fork a shell on every boot after the first.
+# Presets apply on first boot only, so a node that updated from an image
+# without bluefin-update-status.service never enables it. Enabled in /usr
+# (elements/oci/bluefin-server-usr.bst), so it runs on updated nodes too;
+# once per node. Installed nodes only, like bluefin-update-status.service.
 ConditionPathExists=!/var/lib/bluefin/update-status-migrate.stamp
-# Run before anything reads the banners; tmpfiles is what makes /etc/motd a
-# link into /run/motd, and the units we enable write /run/motd.
+ConditionPathExists=!/run/machines/rootdisk.raw
+ConditionKernelCommandLine=!root=tmpfs
 After=systemd-tmpfiles-setup.service
 Before=systemd-user-sessions.service getty.target
 
