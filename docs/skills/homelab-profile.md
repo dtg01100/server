@@ -88,10 +88,8 @@ pinned by digest). Each directory has an `addon` file, `<default>
 every merged add-on in name order with the same rules (CRDs Established
 first, rollout waits, `secrets` generators, files with unset inputs skipped,
 never deleting); `HOMELAB_<ID>=yes|no` in `homelab.conf` overrides the
-default. The UIs are HTTPRoutes on the default Gateway (`homelab`, HTTP on
-port 80 — kept for cert-manager HTTP-01 — and HTTPS on port 443 with a
-wildcard cert for `*.<HOMELAB_DOMAIN>` issued by cert-manager) on the
-MetalLB address of its LoadBalancer Service, by host name under
+default. The UIs are HTTPRoutes on the default Gateway (`homelab`, HTTPS on
+port 443 of its MetalLB address, see "TLS" below) by host name under
 `HOMELAB_DOMAIN` (default `home.arpa`): point `argo.`, `mcp.` and
 `kubestellar.<domain>` at that address.
 
@@ -102,30 +100,26 @@ MetalLB address of its LoadBalancer Service, by host name under
 | `30-kubestellar-console` (`kubestellar`) | on | KubeStellar Console v0.3.42, deployed as is: see "KubeStellar Console sign-in" below. |
 | `31-kubestellar-full` (`kubestellar`) | off | `HOMELAB_KUBESTELLAR_FULL=yes`: KubeStellar core chart 0.30.0 (KubeFlex and the PostCreateHooks that install the KubeStellar controllers into the ITS/WDS control planes you create), with a pinned Postgres in place of KubeFlex's runtime Helm install. Not covered by the QEMU check. |
 
-**TLS.** cert-manager ships with the cluster. The `selfsigned` ClusterIssuer
-is always there; the `acme` ClusterIssuer is added when
-`HOMELAB_ACME_EMAIL` is set (HTTP-01 solved through the same Gateway). The
-applier renders a `Certificate` named `homelab-tls` in
-`envoy-gateway-system` for the three add-on hostnames
-(`argo.`, `mcp.`, `kubestellar.<HOMELAB_DOMAIN>`) and the bare domain; the
-names are listed explicitly because cert-manager refuses wildcard names
-on HTTP-01 ("Wildcard DNS names can only be solved via DNS01"). Its
-`issuerRef` is `acme` when an ACME email is configured, else `selfsigned`
-(then LAN devices have to trust the cert out of band): the Gateway's HTTPS
-listener serves both, but the second is untrusted. Cert-manager rotates
-the cert on time; the Secret name does not change, so the Gateway picks up
-renewals with no rollout. The `http01` solver points at the `homelab`
-Gateway on its HTTP listener, which is the same place the add-ons' HTTPRoutes
-attach; ACME therefore must be able to reach the Gateway's MetalLB address
-under the names it issues for (split-horizon DNS or a real public record).
+**TLS.** The add-on HTTPRoutes take only the Gateway's `https` listener
+(`sectionName: https`), so a bearer token, the Console's login password and
+its session cookie never cross the LAN in cleartext; on port 80 the add-on
+names answer with a 301 to `https://` (`40-envoy-gateway/21-http-redirect.yaml`).
+The certificate (`homelab-tls` in `envoy-gateway-system`, for `argo.`, `mcp.`
+and `kubestellar.<domain>`) comes from the `homelab-ca` ClusterIssuer: a
+self-signed CA that cert-manager creates once (ten years) and keeps in
+`cert-manager/homelab-ca`; the leaf renews by itself and Envoy picks it up.
+Browsers warn until you trust that CA, once per device:
 
-The add-on HTTPRoutes are pinned to the Gateway's `https` listener
-(`sectionName: https`), so the password-protected `/auth/github` and the
-bearer-token requests never traverse the plaintext `:80` listener. A
-second HTTPRoute (`40-envoy-gateway/21-http-redirect.yaml`) sits on the
-`http` listener and 301-redirects to the matching https URL, so a
-browser pointed at `http://argo.<domain>/` lands on `https://` (the
-ACME solver's exact-path route still outranks it for challenges).
+```bash
+kubectl -n cert-manager get secret homelab-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > homelab-ca.crt
+```
+
+MCP clients and the `argo` CLI need it too (Go tools read `SSL_CERT_FILE`,
+Node.js ones `NODE_EXTRA_CA_CERTS`). The Gateway does not use the `acme` ClusterIssuer:
+HTTP-01 needs every name reachable from the internet, which a LAN domain
+such as `home.arpa` never is, and a certificate that cannot be issued would
+leave the add-ons unreachable. `HOMELAB_CERT_MANAGER=no` does the same:
+the `https` listener has no certificate.
 
 **KubeStellar Console sign-in.** Without a GitHub OAuth app, the Console's
 `GET /auth/github` signs in as its built-in admin (`dev-user`; upstream
@@ -168,11 +162,9 @@ kubestellar-console-github-oauth` (the applier never deletes).
 Mind that:
 - everyone with the password is the same admin (`dev-user`): no personal
   identity or audit trail; GitHub sign-in gives one;
-- HTTPS protects the password and the session cookie on the wire; without
-  ACME the cert is self-signed and the browser still warns, so the data is
-  encrypted but the server's identity is not verified — set
-  `HOMELAB_ACME_EMAIL` for a Let's Encrypt cert and trust the Gateway's
-  name in DNS;
+- the password and the session cookie are only as safe as the trust in the
+  homelab CA: a browser that clicked through the certificate warning instead
+  of trusting the CA cannot tell the Gateway from an impostor on the LAN;
 - signing out ends the Console session, but the browser keeps the basic-auth
   login until it is closed, so signing in again does not ask for it;
 - the gate covers the session-creating endpoints of Console v0.3.42 (its
@@ -236,11 +228,10 @@ installer, which installs kubeadm only.
 - `just dogfood-homelab-templates`: a diskless control plane from
   `homelab-control-plane.bu` and a node from `homelab-node.ign` with the
   passphrase it showed; the default set applied (monitoring off, MetalLB
-  without a pool), a local-path PVC bound, both nodes Ready; the homelab
-  Gateway serves a self-signed cert from `homelab-tls` until
-  `HOMELAB_ACME_EMAIL` is set, then a Let's Encrypt one (HTTP-01 through
-  the same Gateway: ACME must reach the MetalLB address under the names
-  it issues for); the add-ons: Argo Workflows answers 401 without a token
+  without a pool), a local-path PVC bound, both nodes Ready; the Gateway
+  serves the add-ons over HTTPS with a certificate that verifies against
+  the homelab CA, and port 80 redirects without asking for the login; the
+  add-ons: Argo Workflows answers 401 without a token
   and accepts a `kubectl create token` one, the MCP server answers 401
   without a token, reads with the `mcp-client` token and refuses a write
   tool; the Console is deployed without OAuth, `/auth/github` through the
