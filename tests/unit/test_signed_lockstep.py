@@ -107,7 +107,7 @@ def test_version_locked_sysexts_are_optional_features(name: str, transfer: str |
 def test_sysupdate_feature_definition_parses(name: str) -> None:
     """Every ``*.feature`` file must parse as a valid ``[Feature]`` section.
 
-    ``systemd-sysupdate`` (and the v262 ``DescribeFeature`` payload) accept
+    ``systemd-sysupdate`` (and sysupdated's ``DescribeFeature``, since v257) accept
     ``Description=``, ``Documentation=`` and ``AppStream=``; unknown keys are
     silently dropped with a parse warning. A missing ``[Feature]`` section
     makes ``updatectl features`` print the feature with empty fields instead
