@@ -29,6 +29,12 @@ description: |
   they hand systemd-sysinstall the Homelab template, the sysexts on the
   stick and, for a node, the join passphrase asked on the console.
 
+  /usr/libexec/bluefin-installer-secure-boot and its unit also run on the USB
+  installer only, required by systemd-sysinstall.service and the Homelab
+  unit: Secure Boot on with the stick's keys continues, anything else is
+  explained on the console and cancels unless the operator (or, unattended,
+  the bluefin.install-allow-insecure-boot credential) allows it.
+
 build-depends:
   - base/base-stack.bst
 
@@ -62,3 +68,5 @@ config:
         "%{install-root}/usr/libexec/bluefin-sysext-modules"
       install -Dm0755 libexec-src/bluefin-homelab-install \
         "%{install-root}/usr/libexec/bluefin-homelab-install"
+      install -Dm0755 libexec-src/bluefin-installer-secure-boot \
+        "%{install-root}/usr/libexec/bluefin-installer-secure-boot"

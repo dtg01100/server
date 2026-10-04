@@ -67,7 +67,8 @@ never offers it there.
 ## Using the installer
 
 This is stock `systemd-sysinstall` (systemd-sysinstall(8)); Bluefin adds no
-installer UI of its own, apart from the Homelab entries' one prompt
+installer UI of its own, apart from the Secure Boot check
+([Secure Boot](#secure-boot)) and the Homelab entries' one prompt
 ([Homelab entries](#homelab-entries)).
 
 1. Boot the stick. systemd-boot offers **Bluefin Server <ver>** (the
@@ -75,7 +76,9 @@ installer UI of its own, apart from the Homelab entries' one prompt
    control plane)** and **(Homelab: node)**; the steps below are the
    default's. The installer UKI sets the `firstboot.keymap` credential
    (`us`), so `systemd-firstboot` asks nothing, and the screen goes straight to
-   **Operating System Installer**.
+   **Operating System Installer**, once the [Secure Boot](#secure-boot)
+   check has passed: silently when Secure Boot is on with the Bluefin Server
+   keys, otherwise only after its warning.
 2. **Target disk.** sysinstall lists every disk it can install to as a
    numbered menu, labelled with its `/dev/disk/by-id/` name (model and serial,
    which is how you tell disks apart). The USB stick itself is never listed.
@@ -190,6 +193,13 @@ already passes `--erase=yes --variables=yes`), plus `StandardInput=null` so any
 leftover prompt fails instead of hanging. `scripts/dogfood-installer.sh` drives
 exactly this path in QEMU and is the reference for the drop-in contents.
 
+That credential is also what marks an install as unattended for the
+[Secure Boot](#secure-boot) check, which then never asks: unless Secure Boot
+is on with the Bluefin Server keys, it cancels (the reason is in the journal,
+and no disk is touched) unless a `bluefin.install-allow-insecure-boot`
+credential says `1`. `DOGFOOD_SECURE_BOOT=off scripts/dogfood-installer.sh`
+checks both on firmware without Secure Boot.
+
 ## First-boot prompts
 
 Root ships locked as `!unprovisioned`, which `systemd-firstboot` reads as
@@ -232,7 +242,8 @@ credential names.
 ### Developer mode: an admin user with SSH and passwordless sudo
 
 For a node that agents manage over SSH, after writing the stick (Secure Boot
-off on the target):
+off on the target, so the installer warns first: choose **Continue without
+Secure Boot**):
 
 ```bash
 user=jorge; uid=1000; key="$(cat ~/.ssh/*.pub)"
@@ -276,10 +287,56 @@ also means Secure Boot can stay on. See
 
 ## Secure Boot
 
-The stick's systemd-boot and UKIs are signed with the project DB key. On bare
-metal put the firmware into Setup Mode and pick the enrollment entry in the
-systemd-boot menu (`secure-boot-enroll if-safe` only auto-enrolls in VMs), or
-turn Secure Boot off.
+Secure Boot is required. The stick's systemd-boot and UKIs, and every disk it
+installs, are signed with the project DB key; without Secure Boot nothing
+checks them, nor the `usrhash=` in the UKI that pins the verified /usr.
+
+### Firmware steps
+
+1. In the firmware setup (usually F2, Del, F10 or Esc at power-on), under
+   Secure Boot, put the firmware into **Setup Mode** ("Reset to Setup Mode",
+   "Clear Secure Boot keys" or "Delete all keys"; some firmware also wants
+   Secure Boot set to Enabled or to "Custom" mode). Save and exit.
+2. Boot the stick (pick it in the firmware's boot menu if needed).
+3. The installer finds the firmware in Setup Mode and offers **2) Enroll the
+   Bluefin Server keys and restart**. systemd-boot writes the stick's
+   `loader/keys/auto/` keys (PK, KEK, db) and restarts; on bare metal it
+   first counts down 15 seconds ("press any key to abort": let it run). The
+   machine comes back with Secure Boot on; boot the stick again if the
+   firmware does not, and install. Instead of the installer's choice, the
+   systemd-boot menu entry **Enroll Secure Boot keys: auto** does the same.
+
+The firmware then trusts only the Bluefin Server keys. Add-in cards whose
+firmware (option ROM) is signed by Microsoft, such as some graphics cards,
+may then not initialise at boot; on such machines keep a way back (another
+graphics output, or the firmware's "restore factory keys").
+`secure-boot-enroll if-safe` enrolls by itself only in VMs.
+
+### The installer's check
+
+`bluefin-installer-secure-boot.service` runs before `systemd-sysinstall`
+and before the Homelab entries' prompt; both `Requires=` it, so when it
+fails neither starts and no disk is touched. It reads `SecureBoot`,
+`SetupMode` and `AuditMode` from efivarfs and decides that Secure Boot is
+on **with our keys** when the firmware's `db` variable holds, byte for byte,
+an X.509 certificate from the stick's `loader/keys/auto/db.auth`:
+
+| Firmware | The installer |
+|---|---|
+| Secure Boot on, our certificate in `db` | Continues without a word. |
+| Setup Mode | Explains, then offers Cancel (default), **Enroll the Bluefin Server keys and restart** (`bootctl set-oneshot secure-boot-keys-auto`, the systemd-boot entry above, then a restart) or Continue without Secure Boot. |
+| Secure Boot off, our keys enrolled | Warns: set Secure Boot to Enabled in the firmware. |
+| Other keys (for example Microsoft's only), Secure Boot on or off | Warns: put the firmware into Setup Mode and boot the stick again to enroll. |
+| No Secure Boot variables, or no `db.auth` on the stick | Warns that the state cannot be checked. |
+
+The warning says what is wrong, why it matters (without Secure Boot anyone
+who can write to the disk can change what boots, and TPM-sealed secrets lose
+their protection) and what to change in the firmware. It then offers
+**1) Cancel** (the default: Enter, anything not listed, or no answer within
+10 minutes) or **Continue without Secure Boot**, which also needs `yes`
+typed. Cancelling leaves the installer up with the reason on the monitor
+(and in the journal); change the firmware and boot the stick again.
+Unattended installs never ask: see [Unattended installs](#unattended-installs).
 
 ## See also
 

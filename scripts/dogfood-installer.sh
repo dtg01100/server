@@ -22,6 +22,11 @@
 #   6. boot the target: it must run <next> from slot B, bless the
 #      boot-counted UKI, and the banner must show <next> with the persisted
 #      last check and no error
+#   DOGFOOD_SECURE_BOOT=off (no <next>, not prior-install) runs on firmware
+#   without Secure Boot (OVMF_CODE_INSECURE) and skips step 1; step 2 then
+#   boots the stick twice: the unattended install must be refused before any
+#   disk write (#309), and then installs with the
+#   bluefin.install-allow-insecure-boot credential
 #   DOGFOOD_TARGET=prior-install (no <next>) instead adds:
 #   5. install again from the stick onto that installed disk (ESP, both usr
 #      slots, xfs root), which must erase it like a blank one (#359)
@@ -63,6 +68,8 @@
 #   DOGFOOD_SYSINSTALL_ARGS=.. extra systemd-sysinstall arguments
 #                              (default --confirm=no)
 #   DOGFOOD_SYSINSTALL_CRED=0  do not pass the unattended drop-in credential
+#   DOGFOOD_SECURE_BOOT=<mode> enforcing (default: the keys from step 1) or
+#                              off (firmware without Secure Boot)
 #   DOGFOOD_MEM=<MiB>          guest memory (default 4096)
 #   DOGFOOD_TIMEOUT=<s>        per-boot timeout (default 600)
 set -euo pipefail
@@ -88,6 +95,13 @@ case "${target_kind}" in
 esac
 [ "${target_kind}" != prior-install ] || [ -z "${next}" ] \
     || { echo "ERROR: DOGFOOD_TARGET=prior-install does not combine with <next>" >&2; exit 1; }
+secure_boot="${DOGFOOD_SECURE_BOOT:-enforcing}"
+case "${secure_boot}" in
+    enforcing) ;;
+    off) [ -z "${next}" ] && [ "${target_kind}" != prior-install ] \
+        || { echo "ERROR: DOGFOOD_SECURE_BOOT=off does not combine with <next> or prior-install" >&2; exit 1; } ;;
+    *) echo "ERROR: DOGFOOD_SECURE_BOOT must be enforcing or off, not '${secure_boot}'" >&2; exit 1 ;;
+esac
 steps=4
 [ -z "${next}" ] || steps=6
 [ "${target_kind}" != prior-install ] || steps=6
@@ -114,6 +128,15 @@ vars_tmpl="${OVMF_VARS:-$(first_existing \
     /usr/share/OVMF/OVMF_VARS_4M.fd \
     /usr/share/OVMF/OVMF_VARS.fd \
     /usr/share/edk2/x64/OVMF_VARS.4m.fd)}" || { echo "ERROR: no blank OVMF_VARS found (set OVMF_VARS)" >&2; exit 1; }
+machine=(-machine "q35,smm=on,accel=kvm" -global "driver=cfi.pflash01,property=secure,value=on")
+if [ "${secure_boot}" = off ]; then
+    code="${OVMF_CODE_INSECURE:-$(first_existing \
+        /usr/share/edk2/ovmf/OVMF_CODE.fd \
+        /usr/share/OVMF/OVMF_CODE_4M.fd \
+        /usr/share/OVMF/OVMF_CODE.fd \
+        /usr/share/edk2/x64/OVMF_CODE.4m.fd)}" || { echo "ERROR: no OVMF_CODE without Secure Boot found (set OVMF_CODE_INSECURE)" >&2; exit 1; }
+    machine=(-machine "q35,accel=kvm")
+fi
 
 rm -rf "${state}"
 mkdir -p "${state}"
@@ -167,8 +190,7 @@ sfdisk -l "${target}" 2>/dev/null | sed -n '/^Device/,$p' | sed 's/^/    /' || t
 cred() { printf 'type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(base64 -w0 < "$2")"; }
 
 qemu=(qemu-system-x86_64
-    -machine q35,smm=on,accel=kvm -cpu host -m "${mem}" -smp 2
-    -global driver=cfi.pflash01,property=secure,value=on
+    "${machine[@]}" -cpu host -m "${mem}" -smp 2
     -drive if=pflash,format=raw,unit=0,readonly=on,file="${code}"
     -drive if=pflash,format=raw,unit=1,file="${vars}"
     -display none -monitor none -no-reboot
@@ -209,9 +231,13 @@ boot() {
     [ "${timed_out}" = 0 ] || { tail -n 40 "${log}.ttyS0.log" >&2; fail "${name}: no result within ${timeout_s}s"; }
 }
 
-echo "==> 1/${steps} enroll Secure Boot keys from the installer (${ver})"
-boot 1-enroll '' "${stick[@]}" -nic none
-grep -aq 'successfully enrolled' "${state}/1-enroll.ttyS0.log" || fail "key enrollment"
+if [ "${secure_boot}" = off ]; then
+    echo "==> 1/${steps} firmware without Secure Boot (${code##*/}): nothing to enroll"
+else
+    echo "==> 1/${steps} enroll Secure Boot keys from the installer (${ver})"
+    boot 1-enroll '' "${stick[@]}" -nic none
+    grep -aq 'successfully enrolled' "${state}/1-enroll.ttyS0.log" || fail "key enrollment"
+fi
 # Firmware state right after enrollment: no boot entry for the target yet.
 cp "${vars}" "${state}/vars-enrolled.fd"
 
@@ -262,8 +288,34 @@ run_install() {
         || fail "$1: the target holds more than the ESP and usr slot A (+ verity) before its first boot"
 }
 
-echo "==> 2/${steps} offline install onto a ${target_kind} disk: ExecStart=${exec_start} ${install_args} ${target_dev}"
-run_install 2-install
+if [ "${secure_boot}" = off ]; then
+    # bluefin-installer-secure-boot.service, which sysinstall Requires=,
+    # reports its result on ttyS1.
+    cat > "${state}/secure-boot-check.conf" <<'CHECK'
+[Service]
+ExecStartPost=/bin/bash -c 'echo "PROBE secure-boot-check=passed" >/dev/ttyS1'
+ExecStopPost=/bin/bash -c '[ "$${SERVICE_RESULT}" = success ] || echo "PROBE secure-boot-check=$${SERVICE_RESULT} $${EXIT_STATUS}" >/dev/ttyS1'
+CHECK
+    install_creds+=(-smbios "$(cred systemd.unit-dropin.bluefin-installer-secure-boot.service "${state}/secure-boot-check.conf")")
+    echo "==> 2/${steps} Secure Boot off: the unattended install is refused before any disk write"
+    before="$(sha256sum < "${target}")"
+    boot 2-refused 'PROBE (secure-boot-check|sysinstall)=' "${stick[@]}" "${disk[@]}" -nic none "${install_creds[@]}"
+    grep -aq 'PROBE secure-boot-check=exit-code 1' "${state}/2-refused.ttyS1.log" || fail "2-refused: the Secure Boot check did not refuse"
+    ! grep -aq 'PROBE sysinstall=' "${state}/2-refused.ttyS1.log" || fail "2-refused: systemd-sysinstall ran"
+    grep -aq 'installation cancelled: unattended install and the firmware reports no Secure Boot state' "${state}/2-refused.ttyS2.log" \
+        || fail "2-refused: no cancellation reason in the journal"
+    [ "$(sha256sum < "${target}")" = "${before}" ] || fail "2-refused: the target disk changed"
+    printf 1 > "${state}/allow-insecure-boot"
+    install_creds+=(-smbios "$(cred bluefin.install-allow-insecure-boot "${state}/allow-insecure-boot")")
+    echo "==> 2/${steps} with bluefin.install-allow-insecure-boot=1: ExecStart=${exec_start} ${install_args} ${target_dev}"
+    run_install 2-install
+    grep -aq 'PROBE secure-boot-check=passed' "${state}/2-install.ttyS1.log" || fail "2-install: the Secure Boot check did not pass"
+    grep -aq 'continuing without Secure Boot (credential bluefin.install-allow-insecure-boot)' "${state}/2-install.ttyS2.log" \
+        || fail "2-install: the check did not log why it continued"
+else
+    echo "==> 2/${steps} offline install onto a ${target_kind} disk: ExecStart=${exec_start} ${install_args} ${target_dev}"
+    run_install 2-install
+fi
 
 {
     printf 'target=/dev/disk/by-id/virtio-%s\n' "${target_serial}"
@@ -393,6 +445,8 @@ check_disk_boot() {
     grep -aq "PROBE os=bluefin-server ${v}" "${log}" || fail "$1: not running ${v}"
     grep -aq "PROBE boots=$2" "${log}" || fail "$1: expected boot $2 of the persistent root"
     grep -aq "PROBE root=xfs@${target_serial}" "${log}" || fail "$1: / is not the target's xfs root"
+    [ "${secure_boot}" != enforcing ] || grep -aq 'PROBE secureboot=enabled (user)' "${log}" \
+        || fail "$1: Secure Boot is not enforcing: $(grep -ao 'PROBE secureboot=.*' "${log}")"
     grep -aq "PROBE slot-b=$4" "${log}" || fail "$1: expected $4 empty slot-B partitions"
     [ "$(grep -ac 'PROBE usr-backing=' "${log}")" -ge 2 ] || fail "$1: no dm-verity backing for /usr"
     while read -r b; do
@@ -441,7 +495,7 @@ if [ "${target_kind}" = prior-install ]; then
     check_disk_boot 6-reinstalled-boot 1 "${ver}" 2
 fi
 
-[ -n "${next}" ] || { echo "PASS: offline installer installed ${ver} onto a ${target_kind} disk$([ "${target_kind}" = prior-install ] && echo ' and again over that install'); the target booted from its own bluefin_usr_${ver} slot (also with the installer attached) with slot B and the xfs root created on first boot and no failed units"; exit 0; }
+[ -n "${next}" ] || { echo "PASS: offline installer installed ${ver} onto a ${target_kind} disk$([ "${target_kind}" = prior-install ] && echo ' and again over that install')$([ "${secure_boot}" = off ] && echo ' without Secure Boot, only once a credential allowed it'); the target booted from its own bluefin_usr_${ver} slot (also with the installer attached) with slot B and the xfs root created on first boot and no failed units"; exit 0; }
 
 if [ -n "${next_ver}" ]; then
     # A local release server: next/ is <next> as built, foreign/ the same

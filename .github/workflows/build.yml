@@ -379,8 +379,10 @@ jobs:
           echo "${OVMF_RPM_SHA256}  ${RUNNER_TEMP}/edk2-ovmf.rpm" | sha256sum -c -
           mkdir -p "${RUNNER_TEMP}/ovmf"
           bsdtar -xf "${RUNNER_TEMP}/edk2-ovmf.rpm" -C "${RUNNER_TEMP}/ovmf" \
-            ./usr/share/edk2/ovmf/OVMF_CODE.secboot.fd ./usr/share/edk2/ovmf/OVMF_VARS.fd
+            ./usr/share/edk2/ovmf/OVMF_CODE.secboot.fd ./usr/share/edk2/ovmf/OVMF_VARS.fd \
+            ./usr/share/edk2/ovmf/OVMF_CODE.fd
           echo "OVMF_CODE=${RUNNER_TEMP}/ovmf/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd" >> "$GITHUB_ENV"
+          echo "OVMF_CODE_INSECURE=${RUNNER_TEMP}/ovmf/usr/share/edk2/ovmf/OVMF_CODE.fd" >> "$GITHUB_ENV"
           echo "OVMF_VARS=${RUNNER_TEMP}/ovmf/usr/share/edk2/ovmf/OVMF_VARS.fd" >> "$GITHUB_ENV"
 
       - name: Diskless boot
@@ -449,6 +451,14 @@ jobs:
         env:
           DOGFOOD_TARGET: foreign-gpt
           DOGFOOD_STATE: dist/dogfood-installer-foreign-gpt
+        run: bash scripts/dogfood-installer.sh dist/diskless
+
+      # Without Secure Boot (#309) an unattended install is refused before any
+      # disk write, and installs only with bluefin.install-allow-insecure-boot.
+      - name: Refuse to install from the USB installer without Secure Boot
+        env:
+          DOGFOOD_SECURE_BOOT: "off"
+          DOGFOOD_STATE: dist/dogfood-installer-secure-boot-off
         run: bash scripts/dogfood-installer.sh dist/diskless
 
       - name: Upload boot logs
